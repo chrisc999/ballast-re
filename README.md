@@ -1,5 +1,9 @@
 # Ballast Re — baUSD
 
+[![CI](https://github.com/chrisc999/ballast-re/actions/workflows/ci.yml/badge.svg)](https://github.com/chrisc999/ballast-re/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/badge/coverage-report-4c1)](https://chrisc999.github.io/ballast-re/)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 **baUSD** is a Soroban-native, appreciating-share vault token backed by reinsurance
 yield. LPs deposit USDC on Stellar and mint baUSD; the share price is
 `total_assets / total_shares`, where `total_assets` is an attested NAV that can move
@@ -7,6 +11,8 @@ yield. LPs deposit USDC on Stellar and mint baUSD; the share price is
 
 > ⚠️ baUSD is not a stablecoin. NAV is attested from off-chain reinsurance treaty
 > performance and can decrease. Not investment advice.
+
+**Status:** deployed on Stellar **testnet** · contracts **unaudited** · not for production use.
 
 ## Demo — deposit → mint → redeem on Stellar testnet
 
@@ -20,9 +26,10 @@ A real, on-chain run against the deployed testnet contracts (reproduce with
 - **baUSD token** — a SEP-41-compatible Soroban token (OpenZeppelin `stellar-tokens`
   base). Mint/burn authority is held **exclusively** by the vault contract. No
   discretionary issuance.
-- **Vault** — appreciating-share accounting (ERC-4626-equivalent). Entrypoints:
-  `subscribe`, `request_redemption`, `claim_redemption`, plus (planned)
-  `update_nav`, sleeve management, pause, and governance-gated upgrade.
+- **Vault** — appreciating-share accounting (ERC-4626-equivalent). Implemented:
+  `subscribe`, `request_redemption`, `claim_redemption`, guardian `pause`/`unpause`,
+  timelocked governance-gated upgrade, and swappable role setters. Planned: attested
+  `update_nav`, liquidity-sleeve management, and allowlist enforcement.
 - **Roles** (separation of duties) — governance multisig (admin/upgrade), guardian
   (pause), attestation authority (NAV), compliance authority (allowlist), treasury ops
   (sleeve). Designed as swappable addresses so mainnet multisig drops in later.
