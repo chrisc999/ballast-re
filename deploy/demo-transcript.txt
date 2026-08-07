@@ -1,0 +1,35 @@
+
+════════════════════════════════════════════════════════════
+   baUSD  ·  deposit → mint → redeem  ·  Stellar testnet
+════════════════════════════════════════════════════════════
+   Vault                      CCKMAP…5JCO
+   baUSD token                CBH5TF…RU4P
+   USDC (mock)                CAJBB6…NW2U
+
+[1/5]  New LP account, funded on testnet
+   LP account                 GAYEFD…6IZV
+
+[2/5]  LP receives 100.00 USDC (mock issuer; real USDC on mainnet)
+   LP USDC                    100.00
+
+[3/5]  LP subscribes 50.00 USDC  →  vault mints baUSD
+   baUSD minted               50.00
+   LP baUSD balance           50.00
+   LP USDC balance            50.00
+   vault NAV (assets)         50.00
+   vault shares               50.00
+   share price                1.0000
+
+[4/5]  LP requests redemption of 50.00 baUSD (escrowed in vault)
+   LP baUSD balance           0.00
+
+[5/5]  LP claims  →  baUSD burned, USDC returned (notice = 0)
+   LP baUSD balance           0.00
+   LP USDC balance            100.00
+   baUSD total supply         0.00
+
+════════════════════════════════════════════════════════════
+   ✅  Full cycle complete on Stellar testnet
+   explorer: stellar.expert/explorer/testnet/contract/CCKMAPT5JPPO4QIAYNU225OBWFJISZL72PSKB4I2B6Y227JUJ7RQ5JCO
+════════════════════════════════════════════════════════════
+
