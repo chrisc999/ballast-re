@@ -1,0 +1,21 @@
+[package]
+name = "ba-usd-vault"
+description = "baUSD appreciating-share vault: deposit, mint, redeem, NAV-based accounting."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+# Note: the vault calls baUSD via a minimal #[contractclient] interface (see lib.rs),
+# NOT by importing the token crate — that keeps the token out of the vault's wasm and
+# avoids an LTO/bitcode conflict between two cdylib crates.
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+# Real baUSD token, used only to build full-lifecycle integration tests.
+ba-usd-token = { path = "../token" }
