@@ -19,7 +19,7 @@ yield. LPs deposit USDC on Stellar and mint baUSD; the share price is
 ![baUSD testnet demo: an LP deposits 50 USDC, mints 50 baUSD, then redeems for 50 USDC](media/demo.gif)
 
 A real, on-chain run against the deployed testnet contracts (reproduce with
-`./scripts/demo_testnet.sh`; see [`DEMO.md`](DEMO.md)).
+`./scripts/demo_testnet.sh`).
 
 ## Architecture (short version)
 
@@ -96,8 +96,7 @@ Live testnet contract IDs (see [`deploy/testnet.json`](deploy/testnet.json)):
 
 **USDC on testnet:** we deploy our own mock USDC as a classic asset wrapped in a Stellar
 Asset Contract (issuer = deployer), so accounts establish a trustline exactly as they would
-for real USDC. On mainnet this is swapped for the real Circle USDC SAC. The demo
-narrative and recording guide are in [`DEMO.md`](DEMO.md).
+for real USDC. On mainnet this is swapped for the real Circle USDC SAC.
 
 ## License
 
