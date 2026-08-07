@@ -1,0 +1,20 @@
+[package]
+name = "ba-usd-token"
+description = "baUSD SEP-41 token; mint/burn authority held exclusively by the vault."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# cdylib -> the wasm artifact; rlib -> importable by the vault's integration tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+stellar-tokens = { workspace = true }   # SEP-41 fungible base (audited)
+stellar-access = { workspace = true }   # ownable access control
+stellar-macros = { workspace = true }   # #[only_owner]
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
