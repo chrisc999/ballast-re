@@ -1,0 +1,30 @@
+# Rust / Cargo
+/target
+**/target
+
+# Soroban / stellar build artifacts
+*.wasm
+.stellar/
+
+# Secrets & local config — NEVER commit
+.env
+.env.*
+!.env.example
+*.pem
+secrets/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Soroban test snapshots — auto-generated on `cargo test`, regenerated each run
+**/test_snapshots/
+
+# Node (dApp)
+node_modules/
+dist/
+
+# Local-only working notes — never publish
+_private/

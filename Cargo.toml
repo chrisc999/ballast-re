@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "contracts/token",
+    "contracts/vault",
+]
+# Note: mock USDC for tests uses Soroban's built-in Stellar Asset Contract via
+# env.register_stellar_asset_contract_v2() in testutils — no custom mock crate
+# needed.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/chrisc999/ballast-re"
+authors = ["Ballast Re"]
+
+# Pinned deliberately. Why we are on the
+# soroban-sdk 26.x line rather than 27.x: OpenZeppelin stellar-tokens 0.7.2
+# (audited) requires soroban-sdk ^26.1.0. stellar-cli 27.1.0 still builds and
+# deploys these contracts (Soroban runs older-SDK contracts on newer protocol).
+[workspace.dependencies]
+soroban-sdk = "=26.1.1"
+# OpenZeppelin Stellar Contracts (audited). Pinned together at 0.7.2.
+stellar-tokens = "=0.7.2"   # SEP-41 fungible base
+stellar-access = "=0.7.2"   # ownable access control
+stellar-macros = "=0.7.2"   # #[only_owner] and friends
+
+# WASM release profile. overflow-checks = true is NON-NEGOTIABLE for a vault:
+# it turns silent i128 wrap-around into a panic instead of a wrong share price.
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+# Faster test builds; keep overflow checks on so tests catch wrap-around too.
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

@@ -1,0 +1,7 @@
+# Pinned so every machine and CI build byte-for-byte identically.
+# Bump deliberately, never incidentally.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32v1-none"]
+profile = "minimal"
