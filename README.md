@@ -113,6 +113,19 @@ scripts/     deploy + demo scripts (testnet)
 Mock USDC in tests is Soroban's built-in Stellar Asset Contract
 (`register_stellar_asset_contract_v2`) — no separate mock crate.
 
+## Web console
+
+A React + Freighter console for the testnet deployment lives in [`app/`](app/):
+connect a wallet, add the USDC trustline, deposit, request/claim/cancel redemptions,
+and watch share price, NAV, and the sleeve live. Contract addresses are imported
+straight from `deploy/testnet.json`, so the app can never drift from what is deployed.
+
+```bash
+cd app && npm install && npm run dev
+```
+
+Requires Node 18+. Freighter must be set to Testnet.
+
 ## Testnet deployment
 
 One command deploys mock USDC + vault + baUSD token + price feed + strategy adapter and
