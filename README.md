@@ -40,6 +40,10 @@ A real, on-chain run against the deployed testnet contracts (reproduce with
 - **Escrow is always reversible** — `request_redemption` moves baUSD into the vault, so
   `cancel_redemption` is gated on nothing but the holder's own signature (not pause, not
   compliance). A request that cannot be claimed can always be undone.
+- **Depeg guard** — NAV is attested in USD terms while subscriptions settle in USDC. While
+  USDC trades at $1 those are the same thing; if it depegs they are not, and the gap is
+  exploitable on deposit. An optional SEP-40 feed (Reflector's, or any other) gates new
+  deposits when the settlement asset drifts more than 2% from parity. Exits are never gated.
 - **Compliance is address-only** — KYC/AML happens off-chain; on approval the compliance
   authority writes the address to the on-chain allowlist. The contract never sees identity
   data. Deciding who is on the list and switching the gate off are deliberately different

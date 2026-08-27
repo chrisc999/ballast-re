@@ -1,9 +1,11 @@
 #![cfg(test)]
 use crate::{
-    assets_for_shares, shares_for_deposit, VaultContract, VaultContractClient, MIN_INITIAL_DEPOSIT,
+    assets_for_shares, shares_for_deposit, Asset, PriceData, VaultContract, VaultContractClient,
+    MIN_INITIAL_DEPOSIT,
 };
 use ba_usd_token::{TokenContract, TokenContractClient};
 use soroban_sdk::{
+    contract, contractimpl, symbol_short,
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
     Address, BytesN, Env, IntoVal, String, Vec,
@@ -1484,4 +1486,188 @@ fn governance_can_disable_the_gate_again() {
     vc.set_allowlist_enabled(&false);
     assert!(vc.is_allowed(&user));
     vc.subscribe(&user, &100_000_000);
+}
+
+// ---- settlement-asset depeg guard --------------------------------------------------
+
+/// A minimal SEP-40 feed, so the depeg guard can be tested without a live oracle.
+/// Reports 14 decimals, matching Reflector's public feeds.
+#[contract]
+pub struct MockFeed;
+
+#[contractimpl]
+impl MockFeed {
+    pub fn __constructor(e: &Env, price: i128, timestamp: u64) {
+        e.storage().instance().set(&symbol_short!("p"), &price);
+        e.storage().instance().set(&symbol_short!("t"), &timestamp);
+    }
+    pub fn set_price(e: &Env, price: i128, timestamp: u64) {
+        e.storage().instance().set(&symbol_short!("p"), &price);
+        e.storage().instance().set(&symbol_short!("t"), &timestamp);
+    }
+    /// Drop the price entirely, standing in for a feed with nothing to report.
+    pub fn clear(e: &Env) {
+        e.storage().instance().remove(&symbol_short!("p"));
+    }
+    pub fn lastprice(e: &Env, _asset: Asset) -> Option<PriceData> {
+        let price: i128 = e.storage().instance().get(&symbol_short!("p"))?;
+        let timestamp: u64 = e.storage().instance().get(&symbol_short!("t")).unwrap_or(0);
+        Some(PriceData { price, timestamp })
+    }
+    pub fn decimals(_e: &Env) -> u32 {
+        14
+    }
+}
+
+/// $1.00 at 14 decimals.
+const PARITY_14: i128 = 100_000_000_000_000;
+
+fn attach_feed(e: &Env, vc: &VaultContractClient, usdc: &Address, price: i128) -> Address {
+    let feed = e.register(MockFeed, (price, e.ledger().timestamp()));
+    vc.set_price_oracle(&Some(feed.clone()), &Some(Asset::Stellar(usdc.clone())));
+    feed
+}
+
+#[test]
+fn pegged_settlement_asset_allows_subscription() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _o) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    attach_feed(&e, &vc, &usdc, PARITY_14);
+
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000);
+    assert_eq!(vc.total_assets(), 100_000_000);
+}
+
+#[test]
+fn drift_inside_the_band_is_tolerated() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _o) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    // $0.99 — 1% off, inside the 2% band. Ordinary noise must not halt the vault.
+    attach_feed(&e, &vc, &usdc, PARITY_14 * 99 / 100);
+
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000);
+}
+
+/// At $0.90, depositing 100 USDC (worth $90) would mint shares against $100 of NAV,
+/// taking $10 from existing holders on every deposit.
+#[test]
+#[should_panic] // SettlementAssetDepegged
+fn depegged_settlement_asset_blocks_subscription() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _o) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    attach_feed(&e, &vc, &usdc, PARITY_14 * 90 / 100);
+
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000);
+}
+
+#[test]
+#[should_panic] // SettlementAssetDepegged — the guard is symmetric
+fn upward_depeg_also_blocks_subscription() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _o) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    attach_feed(&e, &vc, &usdc, PARITY_14 * 110 / 100);
+
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000);
+}
+
+#[test]
+#[should_panic] // OraclePriceUnavailable — fails closed
+fn stale_oracle_blocks_subscription() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _o) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    attach_feed(&e, &vc, &usdc, PARITY_14);
+
+    e.ledger().with_mut(|l| l.timestamp += 2 * 60 * 60); // past the 1h window
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000);
+}
+
+#[test]
+#[should_panic] // OraclePriceUnavailable — fails closed
+fn absent_oracle_price_blocks_subscription() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _o) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let feed = attach_feed(&e, &vc, &usdc, PARITY_14);
+    MockFeedClient::new(&e, &feed).clear();
+
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000);
+}
+
+/// A depeg is arguably exactly when a holder most wants out. Exits are never gated,
+/// even though the USDC they receive is worth less than the NAV it represents.
+#[test]
+fn depeg_never_blocks_exits() {
+    let e = Env::default();
+    let (vault, token, usdc, _a, _g, _o) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let feed = attach_feed(&e, &vc, &usdc, PARITY_14);
+
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    let shares = vc.subscribe(&user, &100_000_000);
+
+    // USDC collapses.
+    MockFeedClient::new(&e, &feed).set_price(&(PARITY_14 / 2), &e.ledger().timestamp());
+
+    vc.request_redemption(&user, &shares);
+    vc.cancel_redemption(&user);
+    assert_eq!(TokenContractClient::new(&e, &token).balance(&user), shares);
+
+    vc.request_redemption(&user, &shares);
+    assert_eq!(vc.claim_redemption(&user), 100_000_000);
+}
+
+#[test]
+fn disabling_the_oracle_restores_subscription() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _o) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    attach_feed(&e, &vc, &usdc, PARITY_14 * 50 / 100); // hard depeg
+    assert!(vc.get_price_oracle().is_some());
+
+    vc.set_price_oracle(&None, &None);
+    assert!(vc.get_price_oracle().is_none());
+
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000); // guard is off again
+}
+
+#[test]
+#[should_panic] // admin auth absent
+fn non_admin_cannot_set_the_price_oracle() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _o) = deploy_with_attestor(&e);
+    let feed = e.register(MockFeed, (PARITY_14, 0u64));
+    let attacker = Address::generate(&e);
+    let asset = Asset::Stellar(usdc.clone());
+
+    e.set_auths(&[]);
+    e.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &vault,
+            fn_name: "set_price_oracle",
+            args: (Some(feed.clone()), Some(asset.clone())).into_val(&e),
+            sub_invokes: &[],
+        },
+    }]);
+    VaultContractClient::new(&e, &vault).set_price_oracle(&Some(feed), &Some(asset));
 }

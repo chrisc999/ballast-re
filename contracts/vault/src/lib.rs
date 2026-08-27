@@ -14,6 +14,29 @@ use soroban_sdk::{
     panic_with_error, symbol_short, token::TokenClient, Address, BytesN, Env, Symbol, Vec,
 };
 
+/// SEP-40 price feed types, redeclared here so the vault can call any SEP-40 oracle
+/// (Reflector's, or any other) without importing it. Soroban contract types match
+/// structurally over XDR, so a local declaration interops with the real thing.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Asset {
+    Stellar(Address),
+    Other(Symbol),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PriceData {
+    pub price: i128,
+    pub timestamp: u64,
+}
+
+#[contractclient(name = "PriceFeedClient")]
+pub trait Sep40PriceFeed {
+    fn lastprice(env: Env, asset: Asset) -> Option<PriceData>;
+    fn decimals(env: Env) -> u32;
+}
+
 /// Minimal client for baUSD's owner-only admin interface. Lets the vault call `mint`
 /// (and, from sub-step 3, `burn`) on the deployed baUSD token by address, without
 /// compiling the token crate into the vault's wasm.
@@ -46,6 +69,15 @@ const MIN_INITIAL_DEPOSIT: i128 = 10_000_000;
 /// parameter: an admin who can shorten the timelock has defeated it, so changing this
 /// requires a contract upgrade, which is itself subject to the current timelock.
 const UPGRADE_TIMELOCK_SECS: u64 = 86_400;
+
+/// How far the settlement asset (USDC) may drift from $1 before new deposits are refused.
+/// 2% — wide enough to ignore ordinary noise, tight enough that a real depeg stops the
+/// mispricing described on `ensure_settlement_asset_pegged`.
+const MAX_DEPEG_BPS: i128 = 200;
+
+/// Oracle prices older than this are treated as unusable. Reflector's public feeds tick on
+/// the order of minutes, so an hour is generous.
+const ORACLE_MAX_AGE_SECS: u64 = 60 * 60;
 
 /// Allowlist entries get a long window (90 days) and are bumped on every access. An
 /// archived entry reads as "not allowed", so a KYC'd LP could otherwise be locked out of
@@ -113,6 +145,11 @@ pub struct RedemptionClaimed {
     pub from: Address,
     pub shares: i128,
     pub assets: i128,
+}
+#[contractevent]
+pub struct PriceOracleSet {
+    #[topic]
+    pub oracle: Option<Address>,
 }
 #[contractevent]
 pub struct AllowlistUpdated {
@@ -223,6 +260,8 @@ pub enum Error {
     NoSharesOutstanding = 24,
     RedemptionsSuspended = 25,
     NotAllowed = 26,
+    SettlementAssetDepegged = 27,
+    OraclePriceUnavailable = 28,
 }
 
 /// Vault configuration and role addresses. Separation of duties: each authority can do
@@ -267,6 +306,8 @@ pub enum DataKey {
     TotalAssets,    // bookkept NAV
     NavLastUpdated, // freshness timestamp (used by update_nav)
     Paused,
+    PriceOracle,          // optional SEP-40 feed used as a USDC depeg guard
+    PriceOracleAsset,     // the Asset identifier this feed knows USDC by
     AllowlistEnabled,     // master switch for compliance gating
     Allowlist(Address),   // per-LP compliance flag (PERSISTENT: unbounded user data)
     RedemptionsSuspended, // deliberate economic gate, distinct from the guardian pause
@@ -349,6 +390,7 @@ impl VaultContract {
         // Never sell shares at a price we cannot currently vouch for. Exits deliberately
         // carry no such gate.
         ensure_nav_fresh(e);
+        ensure_settlement_asset_pegged(e);
         if amount <= 0 {
             panic_with_error!(e, Error::InvalidAmount);
         }
@@ -752,6 +794,41 @@ impl VaultContract {
             new: new_treasury,
         }
         .publish(e);
+    }
+
+    // --- settlement-asset depeg guard --------------------------------------------------
+
+    /// Point the depeg guard at a SEP-40 price feed (Reflector's, or any other) and tell it
+    /// which `Asset` that feed knows USDC by. Admin-gated. Pass `None` to disable.
+    ///
+    /// Optional on purpose: a testnet deployment uses a mock USDC that no public oracle
+    /// carries, and the vault must remain deployable and testable without one.
+    pub fn set_price_oracle(e: &Env, oracle: Option<Address>, asset: Option<Asset>) {
+        read_config(e).admin.require_auth();
+        let s = e.storage().instance();
+        match (&oracle, &asset) {
+            (Some(o), Some(a)) => {
+                s.set(&DataKey::PriceOracle, o);
+                s.set(&DataKey::PriceOracleAsset, a);
+            }
+            _ => {
+                s.remove(&DataKey::PriceOracle);
+                s.remove(&DataKey::PriceOracleAsset);
+            }
+        }
+        s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        PriceOracleSet { oracle }.publish(e);
+    }
+
+    pub fn get_price_oracle(e: &Env) -> Option<Address> {
+        e.storage().instance().get(&DataKey::PriceOracle)
+    }
+
+    /// The settlement asset's current price per the configured feed, if one is set.
+    pub fn settlement_asset_price(e: &Env) -> Option<PriceData> {
+        let oracle: Address = e.storage().instance().get(&DataKey::PriceOracle)?;
+        let asset: Asset = e.storage().instance().get(&DataKey::PriceOracleAsset)?;
+        PriceFeedClient::new(e, &oracle).lastprice(&asset)
     }
 
     // --- compliance allowlist ---------------------------------------------------------
@@ -1226,6 +1303,63 @@ fn commit_nav(e: &Env, old: i128, new: i128, proof_ref: BytesN<32>, extraordinar
         extraordinary,
     }
     .publish(e);
+}
+
+/// Refuse new deposits while the settlement asset has drifted from its peg.
+///
+/// NAV is attested in USD terms, but subscriptions and redemptions settle in USDC. While
+/// USDC trades at $1 those are the same thing. If it depegs they are not, and the gap is
+/// directly exploitable: at $0.90, depositing 100 USDC (worth $90) mints shares against
+/// $100 of NAV, taking $10 of value from existing holders on every deposit.
+///
+/// Gated on SUBSCRIBE ONLY, consistent with every other gate in this contract. A holder who
+/// wants out during a depeg — arguably exactly when they want out most — is never blocked,
+/// even though they receive USDC worth less than the NAV it represents. That is their call
+/// to make, not ours.
+///
+/// Fails CLOSED: if no price is available or the feed has gone stale, deposits stop. This
+/// hands the oracle the power to halt subscriptions, which is a real dependency and the
+/// reason the guard is optional. The blast radius is deliberately limited to deposits.
+fn ensure_settlement_asset_pegged(e: &Env) {
+    let s = e.storage().instance();
+    let oracle: Address = match s.get(&DataKey::PriceOracle) {
+        Some(o) => o,
+        None => return, // guard not configured
+    };
+    let asset: Asset = match s.get(&DataKey::PriceOracleAsset) {
+        Some(a) => a,
+        None => return,
+    };
+
+    let client = PriceFeedClient::new(e, &oracle);
+    let quote = match client.lastprice(&asset) {
+        Some(q) => q,
+        None => panic_with_error!(e, Error::OraclePriceUnavailable),
+    };
+
+    if e.ledger().timestamp().saturating_sub(quote.timestamp) > ORACLE_MAX_AGE_SECS {
+        panic_with_error!(e, Error::OraclePriceUnavailable);
+    }
+
+    // The feed reports prices scaled by 10^decimals, so parity is exactly that scale.
+    let parity = 10i128
+        .checked_pow(client.decimals())
+        .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
+    let drift = if quote.price > parity {
+        quote.price - parity
+    } else {
+        parity - quote.price
+    };
+    // Multiply before divide; never divide at all.
+    let lhs = drift
+        .checked_mul(BPS_DENOM)
+        .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
+    let rhs = parity
+        .checked_mul(MAX_DEPEG_BPS)
+        .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
+    if lhs > rhs {
+        panic_with_error!(e, Error::SettlementAssetDepegged);
+    }
 }
 
 fn ensure_nav_fresh(e: &Env) {
