@@ -305,6 +305,7 @@ pub enum DataKey {
     TotalShares,
     TotalAssets,    // bookkept NAV
     NavLastUpdated, // freshness timestamp (used by update_nav)
+    NavBaseline,    // total_assets as of the last attestation; bounds the delta cap
     Paused,
     PriceOracle,          // optional SEP-40 feed used as a USDC depeg guard
     PriceOracleAsset,     // the Asset identifier this feed knows USDC by
@@ -359,6 +360,7 @@ impl VaultContract {
         s.set(&DataKey::AttestationThreshold, &1u32);
         s.set(&DataKey::TotalShares, &0i128);
         s.set(&DataKey::TotalAssets, &0i128);
+        s.set(&DataKey::NavBaseline, &0i128);
         s.set(&DataKey::NavLastUpdated, &e.ledger().timestamp());
         s.set(&DataKey::Paused, &false);
         s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -423,6 +425,11 @@ impl VaultContract {
         let s = e.storage().instance();
         s.set(&DataKey::TotalAssets, &new_ta);
         s.set(&DataKey::TotalShares, &new_ts);
+        // The FIRST deposit establishes the NAV baseline the delta cap is measured against.
+        // Later deposits deliberately do NOT raise it - see `ensure_nav_delta_within_bound`.
+        if ts == 0 {
+            s.set(&DataKey::NavBaseline, &amount);
+        }
         s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         // Interactions: pull USDC into the vault, then mint baUSD. USDC is a
@@ -1132,6 +1139,20 @@ impl VaultContract {
             .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow))
     }
 
+    /// Shares required to redeem AT LEAST `assets`, rounded UP.
+    ///
+    /// The mirror of `convert_to_shares` for callers that must guarantee a minimum payout
+    /// rather than price a deposit. Rounding UP still keeps the vault's favour: the caller
+    /// surrenders slightly more shares, never fewer. Integrators wiring the vault into a
+    /// protocol that expects an exact withdrawal amount need this - using the flooring
+    /// conversion there lands a stroop short and the withdrawal fails.
+    pub fn convert_to_shares_ceil(e: &Env, assets: i128) -> i128 {
+        let ts = read_i128(e, &DataKey::TotalShares);
+        let ta = read_i128(e, &DataKey::TotalAssets);
+        shares_for_deposit_ceil(assets, ts, ta)
+            .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow))
+    }
+
     /// USDC returned for redeeming `shares`, rounded DOWN (the vault's favor).
     pub fn convert_to_assets(e: &Env, shares: i128) -> i128 {
         let ts = read_i128(e, &DataKey::TotalShares);
@@ -1276,14 +1297,30 @@ fn ensure_nav_cadence(e: &Env) {
     }
 }
 
-/// |new - old| must be within MAX_NAV_DELTA_BPS of old. Multiply before divide - in fact
-/// never divide at all - so the bound is exact at any magnitude.
+/// |new - old| must be within MAX_NAV_DELTA_BPS of the NAV BASELINE - not of `old`.
+///
+/// The distinction is the whole point. `old` is `total_assets`, which any caller can inflate
+/// on demand simply by depositing: subscribe adds to it immediately. Measuring the cap
+/// against `old` would let an attacker deposit a large sum, have a compromised quorum attest
+/// a percentage of the inflated total, redeem, and walk away with far more fabricated value
+/// than the cap was ever meant to permit - with a zero notice period, all in one transaction.
+/// The cadence floor does not help: it limits how OFTEN that happens, not how large it is.
+///
+/// So the bound is a percentage of the last ATTESTED total (set by `commit_nav`, and by the
+/// first deposit at bootstrap), floored by the current total so large redemptions shrink the
+/// budget too. Deposits are real value and are fully credited to `total_assets`; they simply
+/// do not expand how much a quorum may fabricate before being verified.
+///
+/// Multiply before divide - in fact never divide at all - so the bound is exact at any
+/// magnitude.
 fn ensure_nav_delta_within_bound(e: &Env, old: i128, new: i128) {
+    let baseline = read_i128(e, &DataKey::NavBaseline);
+    let bound_base = if old < baseline { old } else { baseline };
     let diff = if new > old { new - old } else { old - new };
     let lhs = diff
         .checked_mul(BPS_DENOM)
         .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
-    let rhs = old
+    let rhs = bound_base
         .checked_mul(MAX_NAV_DELTA_BPS)
         .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
     if lhs > rhs {
@@ -1294,6 +1331,8 @@ fn ensure_nav_delta_within_bound(e: &Env, old: i128, new: i128) {
 fn commit_nav(e: &Env, old: i128, new: i128, proof_ref: BytesN<32>, extraordinary: bool) {
     let s = e.storage().instance();
     s.set(&DataKey::TotalAssets, &new);
+    // The attested figure becomes the baseline the next delta cap is measured against.
+    s.set(&DataKey::NavBaseline, &new);
     s.set(&DataKey::NavLastUpdated, &e.ledger().timestamp());
     s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     NavUpdated {
@@ -1426,6 +1465,19 @@ fn shares_for_deposit(assets_in: i128, total_shares: i128, total_assets: i128) -
     let num = assets_in.checked_mul(total_shares.checked_add(VIRTUAL_SHARES)?)?;
     let den = total_assets.checked_add(VIRTUAL_ASSETS)?;
     num.checked_div(den)
+}
+
+/// As `shares_for_deposit`, but rounded UP. Used where a caller must be guaranteed at least
+/// a given payout; see `convert_to_shares_ceil`.
+fn shares_for_deposit_ceil(
+    assets_in: i128,
+    total_shares: i128,
+    total_assets: i128,
+) -> Option<i128> {
+    let num = assets_in.checked_mul(total_shares.checked_add(VIRTUAL_SHARES)?)?;
+    let den = total_assets.checked_add(VIRTUAL_ASSETS)?;
+    // ceil(num/den) for non-negative num, den > 0.
+    num.checked_add(den.checked_sub(1)?)?.checked_div(den)
 }
 
 fn assets_for_shares(shares_in: i128, total_shares: i128, total_assets: i128) -> Option<i128> {

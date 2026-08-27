@@ -1,7 +1,7 @@
 #![cfg(test)]
 use crate::{
-    assets_for_shares, shares_for_deposit, Asset, PriceData, VaultContract, VaultContractClient,
-    MIN_INITIAL_DEPOSIT,
+    assets_for_shares, shares_for_deposit, shares_for_deposit_ceil, Asset, PriceData,
+    VaultContract, VaultContractClient, MIN_INITIAL_DEPOSIT,
 };
 use ba_usd_token::{TokenContract, TokenContractClient};
 use soroban_sdk::{
@@ -1670,4 +1670,76 @@ fn non_admin_cannot_set_the_price_oracle() {
         },
     }]);
     VaultContractClient::new(&e, &vault).set_price_oracle(&Some(feed), &Some(asset));
+}
+
+// ---- the NAV delta cap cannot be amplified by depositing first ----------------------
+
+/// `total_assets` is caller-inflatable: subscribe adds to it immediately. If the delta cap
+/// were a percentage of THAT, an attacker could deposit a large sum, have a compromised
+/// quorum attest a percentage of the inflated total, redeem, and extract far more
+/// fabricated value than the cap was ever meant to permit - with notice at zero, in a
+/// single transaction. The cap is therefore measured against the last ATTESTED baseline.
+#[test]
+#[should_panic] // NavDeltaTooLarge
+fn a_large_deposit_does_not_widen_the_nav_delta_cap() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, attestor) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+
+    let lp = Address::generate(&e);
+    fund_usdc(&e, &usdc, &lp, 100_000_000);
+    vc.subscribe(&lp, &100_000_000); // baseline: 100_000_000
+
+    // Attacker inflates the bookkept total tenfold.
+    let attacker = Address::generate(&e);
+    fund_usdc(&e, &usdc, &attacker, 900_000_000);
+    vc.subscribe(&attacker, &900_000_000);
+    assert_eq!(vc.total_assets(), 1_000_000_000);
+
+    advance_past_cadence(&e);
+    // 2% of the INFLATED total would be 20_000_000 of fabricated value. 2% of the baseline
+    // is 2_000_000. This must be refused.
+    vc.update_nav(&1_020_000_000, &proof(&e), &signers(&e, &[&attestor]));
+}
+
+#[test]
+fn an_honest_attestation_after_a_large_deposit_still_succeeds() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, attestor) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+
+    let lp = Address::generate(&e);
+    fund_usdc(&e, &usdc, &lp, 100_000_000);
+    vc.subscribe(&lp, &100_000_000);
+
+    let lp2 = Address::generate(&e);
+    fund_usdc(&e, &usdc, &lp2, 900_000_000);
+    vc.subscribe(&lp2, &900_000_000);
+
+    advance_past_cadence(&e);
+    // A real day's return on 1.0bn is nowhere near the 2m budget; deposits are fully
+    // credited to total_assets, they just do not expand the fabrication budget.
+    vc.update_nav(&1_000_500_000, &proof(&e), &signers(&e, &[&attestor]));
+    assert_eq!(vc.total_assets(), 1_000_500_000);
+
+    // And the newly attested figure becomes the baseline, so the budget grows legitimately.
+    advance_past_cadence(&e);
+    vc.update_nav(&1_015_000_000, &proof(&e), &signers(&e, &[&attestor]));
+    assert_eq!(vc.total_assets(), 1_015_000_000);
+}
+
+#[test]
+fn shares_ceil_conversion_guarantees_the_payout() {
+    // At a share price above 1.0 the flooring conversion lands a stroop short.
+    let ts = 100_000_000i128;
+    let ta = 102_000_000i128;
+    let amount = 10_000_000i128;
+
+    let floored = shares_for_deposit(amount, ts, ta).unwrap();
+    assert!(assets_for_shares(floored, ts, ta).unwrap() < amount);
+
+    let ceiled = shares_for_deposit_ceil(amount, ts, ta).unwrap();
+    assert!(assets_for_shares(ceiled, ts, ta).unwrap() >= amount);
+    // Costs the caller at most one extra share.
+    assert_eq!(ceiled, floored + 1);
 }

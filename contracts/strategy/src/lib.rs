@@ -40,7 +40,7 @@ pub trait BaUsdVault {
     fn claim_redemption(env: Env, from: Address) -> i128;
     fn cancel_redemption(env: Env, from: Address);
     fn convert_to_assets(env: Env, shares: i128) -> i128;
-    fn convert_to_shares(env: Env, assets: i128) -> i128;
+    fn convert_to_shares_ceil(env: Env, assets: i128) -> i128;
     fn get_redemption(env: Env, who: Address) -> Option<RedemptionRequest>;
     fn get_token(env: Env) -> Address;
 }
@@ -171,9 +171,23 @@ impl StrategyContract {
         let me = e.current_contract_address();
 
         let held = read_shares(e, &from);
-        let needed = vault.convert_to_shares(&amount);
-        if needed <= 0 || needed > held {
+        if held <= 0 {
             return Err(StrategyError::InsufficientBalance);
+        }
+
+        // Round the required shares UP. The flooring conversion is right for pricing a
+        // deposit and wrong here: it lands a stroop short of `amount` at any share price
+        // other than exactly 1.0, so the claim underpays and the withdrawal fails despite
+        // ample shares and sleeve. Rounding up costs the caller at most one share and
+        // guarantees the payout covers the request.
+        let mut needed = vault.convert_to_shares_ceil(&amount);
+        if needed <= 0 {
+            return Err(StrategyError::InvalidAmount);
+        }
+        if needed > held {
+            // Withdrawing the whole position: rounding up can exceed the holding by a
+            // share. Use everything they have and let the payout check below decide.
+            needed = held;
         }
 
         // Defensive: clear any request left over from an earlier attempt. A reverted
@@ -200,6 +214,9 @@ impl StrategyContract {
         }
 
         write_shares(e, &from, held - needed);
+        // Pay out everything the claim produced, not just `amount`. Rounding up the shares
+        // can yield a stroop or so more; forwarding it keeps the adapter holding no
+        // unattributed dust, and the burned shares match the value delivered exactly.
         TokenClient::new(e, &underlying).transfer(&me, &to, &paid);
 
         Self::balance(e, from)

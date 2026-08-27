@@ -271,3 +271,80 @@ fn an_unlisted_adapter_cannot_subscribe() {
     let dfx = h.depositor(100_000_000);
     assert!(h.strategy.try_deposit(&100_000_000, &dfx).is_err());
 }
+
+// ---- withdrawal must work at share prices other than exactly 1.0 -------------------
+
+impl Harness {
+    fn attest(&self, nav: i128, tag: u8) {
+        let mut signers = Vec::new(&self.e);
+        signers.push_back(self.treasury.clone());
+        self.e
+            .ledger()
+            .with_mut(|l| l.timestamp += 20 * 60 * 60 + 1);
+        self.vault.update_nav(
+            &nav,
+            &soroban_sdk::BytesN::from_array(&self.e, &[tag; 32]),
+            &signers,
+        );
+    }
+}
+
+/// Regression: the adapter used the FLOORING conversion to size the redemption. At any
+/// share price other than exactly 1.0 that lands a stroop short, the claim underpays, and
+/// the withdrawal fails despite ample shares and sleeve liquidity. Every earlier test ran
+/// at price 1.0, where floor and ceiling coincide, so none of them caught it.
+#[test]
+fn withdrawal_succeeds_after_a_nav_increase() {
+    let h = setup(0);
+    let dfx = h.depositor(100_000_000);
+    h.strategy.deposit(&100_000_000, &dfx);
+
+    h.attest(102_000_000, 1); // +2%, share price now 1.02
+
+    let recipient = Address::generate(&h.e);
+    h.strategy.withdraw(&10_000_000, &dfx, &recipient);
+    assert!(h.usdc_of(&recipient) >= 10_000_000);
+}
+
+#[test]
+fn withdrawal_succeeds_after_a_nav_decrease() {
+    let h = setup(0);
+    let dfx = h.depositor(100_000_000);
+    h.strategy.deposit(&100_000_000, &dfx);
+
+    h.attest(98_000_000, 2); // -2%
+
+    let recipient = Address::generate(&h.e);
+    h.strategy.withdraw(&10_000_000, &dfx, &recipient);
+    assert!(h.usdc_of(&recipient) >= 10_000_000);
+}
+
+/// A full exit after NAV rises needs the accrued gain to actually be IN the vault. The
+/// vault owes 102m but holds only the 100m that was deposited; the extra 2m has to come
+/// back from treaties first. Until it does, the claim can only partly fill and the adapter
+/// correctly declines - which is the whole point of the sleeve.
+#[test]
+fn full_exit_after_a_nav_rise_needs_the_gain_funded() {
+    let h = setup(0);
+    let dfx = h.depositor(100_000_000);
+    h.strategy.deposit(&100_000_000, &dfx);
+    h.attest(102_000_000, 3);
+
+    let recipient = Address::generate(&h.e);
+    let owed = h.strategy.balance(&dfx);
+    assert!(owed > 100_000_000);
+
+    // The sleeve is short of the accrued gain, so the exit is refused rather than partly
+    // filled - and nothing is stranded at the vault.
+    assert!(h.strategy.try_withdraw(&owed, &dfx, &recipient).is_err());
+    assert_eq!(h.strategy.balance(&dfx), owed);
+
+    // Treasury returns the gain from treaties, and the exit completes.
+    StellarAssetClient::new(&h.e, &h.usdc).mint(&h.treasury, &5_000_000);
+    h.vault.fund_sleeve(&5_000_000);
+
+    h.strategy.withdraw(&owed, &dfx, &recipient);
+    // Rounding up the shares can consume the whole holding; nothing is left stranded.
+    assert_eq!(h.strategy.shares_of(&dfx), 0);
+    assert!(h.usdc_of(&recipient) >= owed);
+}
