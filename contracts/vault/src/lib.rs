@@ -109,6 +109,26 @@ pub struct RedemptionClaimed {
     pub assets: i128,
 }
 #[contractevent]
+pub struct SleeveFunded {
+    pub amount: i128,
+}
+#[contractevent]
+pub struct CapitalDeployed {
+    pub amount: i128,
+}
+#[contractevent]
+pub struct RedemptionsSuspendedSet {
+    pub suspended: bool,
+}
+#[contractevent]
+pub struct RedemptionPartiallyFilled {
+    #[topic]
+    pub from: Address,
+    pub shares_burned: i128,
+    pub assets_paid: i128,
+    pub shares_remaining: i128,
+}
+#[contractevent]
 pub struct NavUpdated {
     pub old_total_assets: i128,
     pub new_total_assets: i128,
@@ -185,6 +205,7 @@ pub enum Error {
     DuplicateAttestor = 22,
     InvalidThreshold = 23,
     NoSharesOutstanding = 24,
+    RedemptionsSuspended = 25,
 }
 
 /// Vault configuration and role addresses. Separation of duties: each authority can do
@@ -229,6 +250,7 @@ pub enum DataKey {
     TotalAssets,    // bookkept NAV
     NavLastUpdated, // freshness timestamp (used by update_nav)
     Paused,
+    RedemptionsSuspended, // deliberate economic gate, distinct from the guardian pause
     Attestors,            // Vec<Address> authorized to attest NAV
     AttestationThreshold, // m of n: how many of them must sign one update
     PendingAdmin,         // admin handover awaiting acceptance by the proposed address
@@ -416,9 +438,10 @@ impl VaultContract {
     }
 
     /// Claim a matured redemption: burn the escrowed baUSD and pay USDC at claim-time NAV.
-    pub fn claim_redemption(e: &Env, from: Address) {
+    pub fn claim_redemption(e: &Env, from: Address) -> i128 {
         from.require_auth();
         ensure_not_paused(e);
+        ensure_redemptions_not_suspended(e);
         // Claims ARE compliance-gated: this pays USDC out of the vault. `cancel_redemption`
         // deliberately is not, so a de-allowlisted holder can always recover their own
         // escrowed shares even while barred from exiting to cash.
@@ -447,40 +470,84 @@ impl VaultContract {
         let assets = assets_for_shares(req.shares, ts, ta)
             .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
 
-        // Sleeve liquidity: the vault must hold enough USDC to pay now (otherwise the
-        // request would queue). While the vault holds all deposits, this always passes.
+        // Sleeve liquidity. Most capital sits in treaties, so a sleeve too small to pay
+        // in full is an EXPECTED state, not a failure. Pay what the sleeve covers and
+        // leave the remainder queued, rather than failing the whole claim.
         let usdc = TokenClient::new(e, &config.usdc);
         let vault_addr = e.current_contract_address();
-        if assets > usdc.balance(&vault_addr) {
+        let available = usdc.balance(&vault_addr);
+        if available <= 0 {
             panic_with_error!(e, Error::InsufficientSleeve);
         }
+
+        let (shares_to_burn, assets_to_pay) = if assets <= available {
+            (req.shares, assets)
+        } else {
+            // Partial fill: burn only the shares the sleeve actually covers. Both
+            // conversions floor, so rounding favors the vault at each step.
+            let covered = shares_for_deposit(available, ts, ta)
+                .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
+            if covered <= 0 || covered >= req.shares {
+                // Nothing meaningful to pay, or the arithmetic disagrees with the branch
+                // we are in - refuse rather than guess.
+                panic_with_error!(e, Error::InsufficientSleeve);
+            }
+            let pay = assets_for_shares(covered, ts, ta)
+                .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
+            (covered, pay)
+        };
+        let shares_remaining = req.shares - shares_to_burn;
 
         // Effects: shrink bookkept totals and drop the request. The totals must actually
         // cover what is leaving; enforce that rather than assuming the invariant holds.
         let new_ts = ts
-            .checked_sub(req.shares)
+            .checked_sub(shares_to_burn)
             .filter(|v| *v >= 0)
             .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
         let new_ta = ta
-            .checked_sub(assets)
+            .checked_sub(assets_to_pay)
             .filter(|v| *v >= 0)
             .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
         let s = e.storage().instance();
         s.set(&DataKey::TotalShares, &new_ts);
         s.set(&DataKey::TotalAssets, &new_ta);
         s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-        e.storage().persistent().remove(&key);
+
+        if shares_remaining > 0 {
+            // Keep the request alive, reduced. `claimable_at` is unchanged: the holder
+            // already served their notice and must not restart it because the vault was
+            // short.
+            let rest = RedemptionRequest {
+                shares: shares_remaining,
+                claimable_at: req.claimable_at,
+            };
+            e.storage().persistent().set(&key, &rest);
+            bump_request_ttl(e, &key, config.notice_period);
+        } else {
+            e.storage().persistent().remove(&key);
+        }
 
         // Interactions: burn the escrowed baUSD (vault authorizes as holder), pay USDC out.
-        TokenClient::new(e, &token_addr).burn(&vault_addr, &req.shares);
-        usdc.transfer(&vault_addr, from.clone(), &assets);
+        TokenClient::new(e, &token_addr).burn(&vault_addr, &shares_to_burn);
+        usdc.transfer(&vault_addr, from.clone(), &assets_to_pay);
 
-        RedemptionClaimed {
-            from,
-            shares: req.shares,
-            assets,
+        if shares_remaining > 0 {
+            RedemptionPartiallyFilled {
+                from,
+                shares_burned: shares_to_burn,
+                assets_paid: assets_to_pay,
+                shares_remaining,
+            }
+            .publish(e);
+        } else {
+            RedemptionClaimed {
+                from,
+                shares: shares_to_burn,
+                assets: assets_to_pay,
+            }
+            .publish(e);
         }
-        .publish(e);
+        assets_to_pay
     }
 
     /// Cancel a pending redemption and take back the escrowed baUSD.
@@ -668,6 +735,88 @@ impl VaultContract {
         .publish(e);
     }
 
+    // --- treasury: liquidity sleeve --------------------------------------------------
+
+    /// Move USDC OUT of the vault to the treasury, to be deployed into reinsurance
+    /// treaties. Treasury-gated.
+    ///
+    /// NAV-NEUTRAL by design: the capital still belongs to the vault, it has simply moved
+    /// from the on-chain sleeve into treaties. `total_assets` is the attested NAV of
+    /// everything the vault owns, on-chain or not, so it must NOT change here. Only
+    /// `update_nav` moves NAV.
+    pub fn deploy_capital(e: &Env, amount: i128) {
+        let config = read_config(e);
+        config.treasury.require_auth();
+        ensure_not_paused(e);
+        if amount <= 0 {
+            panic_with_error!(e, Error::InvalidAmount);
+        }
+
+        let usdc = TokenClient::new(e, &config.usdc);
+        let vault_addr = e.current_contract_address();
+        if amount > usdc.balance(&vault_addr) {
+            panic_with_error!(e, Error::InsufficientSleeve);
+        }
+        usdc.transfer(&vault_addr, &config.treasury, &amount);
+
+        CapitalDeployed { amount }.publish(e);
+    }
+
+    /// Move USDC INTO the vault's sleeve from the treasury — returning capital from
+    /// treaties, or topping up to meet redemptions. Treasury-gated.
+    ///
+    /// Also NAV-neutral, for the mirror-image reason: this is the same capital coming
+    /// back, not new value. Attesting yield is `update_nav`'s job alone. Keeping these
+    /// two concerns apart is what stops the sleeve balance from being mistaken for NAV.
+    pub fn fund_sleeve(e: &Env, amount: i128) {
+        let config = read_config(e);
+        config.treasury.require_auth();
+        if amount <= 0 {
+            panic_with_error!(e, Error::InvalidAmount);
+        }
+
+        TokenClient::new(e, &config.usdc).transfer(
+            &config.treasury,
+            e.current_contract_address(),
+            &amount,
+        );
+
+        SleeveFunded { amount }.publish(e);
+    }
+
+    /// USDC currently held on-chain and available to pay claims. This is NOT `total_assets`
+    /// — most capital sits in treaties.
+    pub fn sleeve_balance(e: &Env) -> i128 {
+        let config = read_config(e);
+        TokenClient::new(e, &config.usdc).balance(&e.current_contract_address())
+    }
+
+    /// Suspend or resume redemption claims. Admin-gated.
+    ///
+    /// Distinct from the guardian pause on purpose. Pause is an emergency brake on
+    /// everything; suspension is a deliberate economic decision — capital is committed to
+    /// treaties and cannot be recalled yet. Separating them keeps the roles honest: an
+    /// operational emergency and a liquidity decision should not share one switch.
+    ///
+    /// Suspension blocks `claim_redemption`. It deliberately does NOT block
+    /// `request_redemption` (holders may still queue) or `cancel_redemption` (holders may
+    /// always leave the queue). Deferring an exit indefinitely is only acceptable if the
+    /// holder can withdraw the request instead.
+    pub fn set_redemptions_suspended(e: &Env, suspended: bool) {
+        read_config(e).admin.require_auth();
+        let s = e.storage().instance();
+        s.set(&DataKey::RedemptionsSuspended, &suspended);
+        s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        RedemptionsSuspendedSet { suspended }.publish(e);
+    }
+
+    pub fn redemptions_suspended(e: &Env) -> bool {
+        e.storage()
+            .instance()
+            .get(&DataKey::RedemptionsSuspended)
+            .unwrap_or(false)
+    }
+
     // --- NAV attestation ------------------------------------------------------------
 
     /// Write a new attested NAV. Requires `threshold`-of-`n` attestor signatures on one
@@ -849,6 +998,16 @@ fn ensure_not_paused(e: &Env) {
 /// Allowlist compliance gate — currently a no-op (everyone allowed). Populating and
 /// enforcing the list here later keeps subscribe/redeem the same shape.
 fn ensure_allowed(_e: &Env, _who: &Address) {}
+
+fn ensure_redemptions_not_suspended(e: &Env) {
+    if e.storage()
+        .instance()
+        .get(&DataKey::RedemptionsSuspended)
+        .unwrap_or(false)
+    {
+        panic_with_error!(e, Error::RedemptionsSuspended);
+    }
+}
 
 fn read_attestors(e: &Env) -> Vec<Address> {
     e.storage()

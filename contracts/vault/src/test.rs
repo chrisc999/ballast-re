@@ -169,9 +169,17 @@ fn deploy_with_notice(e: &Env, notice: u64) -> (Address, Address, Address, Addre
     (v, t, u, a, g)
 }
 
-/// Same wiring, but also hands back the seeded attestor so NAV tests can sign.
+/// Same wiring, but also hands back the seeded attestor so NAV tests can sign. The
+/// attestation, compliance and treasury roles all share this address in tests.
 fn deploy_with_attestor(e: &Env) -> (Address, Address, Address, Address, Address, Address) {
     deploy_inner(e, 0)
+}
+
+fn deploy_with_notice_and_attestor(
+    e: &Env,
+    notice: u64,
+) -> (Address, Address, Address, Address, Address, Address) {
+    deploy_inner(e, notice)
 }
 
 fn deploy_inner(e: &Env, notice: u64) -> (Address, Address, Address, Address, Address, Address) {
@@ -1088,4 +1096,220 @@ fn nav_last_updated_tracks_attestations() {
     vc.update_nav(&101_000_000, &proof(&e), &signers(&e, &[&attestor]));
     assert_eq!(vc.nav_last_updated(), now);
     assert!(!vc.is_nav_stale());
+}
+
+// ---- treasury sleeve management ----------------------------------------------------
+// Both directions are NAV-NEUTRAL: capital moving between the on-chain sleeve and the
+// treaties is the same capital. Only update_nav moves NAV.
+
+#[test]
+fn deploy_capital_drains_sleeve_without_touching_nav() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, treasury) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000);
+    assert_eq!(vc.sleeve_balance(), 100_000_000);
+
+    vc.deploy_capital(&60_000_000);
+
+    assert_eq!(vc.sleeve_balance(), 40_000_000);
+    assert_eq!(vc.total_assets(), 100_000_000); // NAV unchanged
+    assert_eq!(vc.share_price(), 10_000_000);
+    assert_eq!(TokenClient::new(&e, &usdc).balance(&treasury), 60_000_000);
+}
+
+#[test]
+fn fund_sleeve_refills_without_touching_nav() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _treasury) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000);
+    vc.deploy_capital(&60_000_000);
+
+    vc.fund_sleeve(&60_000_000);
+
+    assert_eq!(vc.sleeve_balance(), 100_000_000);
+    assert_eq!(vc.total_assets(), 100_000_000); // still unchanged
+}
+
+#[test]
+#[should_panic] // InsufficientSleeve
+fn deploy_capital_beyond_sleeve_reverts() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _tr) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000);
+    vc.deploy_capital(&150_000_000);
+}
+
+#[test]
+#[should_panic] // treasury auth absent
+fn non_treasury_cannot_deploy_capital() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _tr) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000);
+
+    let attacker = Address::generate(&e);
+    e.set_auths(&[]);
+    e.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &vault,
+            fn_name: "deploy_capital",
+            args: (10_000_000i128,).into_val(&e),
+            sub_invokes: &[],
+        },
+    }]);
+    vc.deploy_capital(&10_000_000);
+}
+
+// ---- partial fills: a short sleeve queues the remainder, it does not fail -----------
+
+#[test]
+fn short_sleeve_pays_what_it_covers_and_queues_the_rest() {
+    let e = Env::default();
+    let (vault, token, usdc, _a, _g, _tr) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    let shares = vc.subscribe(&user, &100_000_000);
+
+    vc.deploy_capital(&60_000_000); // only 40 USDC left on-chain
+    vc.request_redemption(&user, &shares);
+
+    let paid = vc.claim_redemption(&user);
+
+    assert_eq!(paid, 40_000_000);
+    assert_eq!(TokenClient::new(&e, &usdc).balance(&user), 40_000_000);
+    // The rest stays queued, and the escrowed remainder is still held by the vault.
+    let rest = vc.get_redemption(&user).unwrap();
+    assert_eq!(rest.shares, shares - 40_000_000);
+    assert_eq!(
+        TokenContractClient::new(&e, &token).balance(&vault),
+        shares - 40_000_000
+    );
+    assert_eq!(vc.total_shares(), shares - 40_000_000);
+    assert_eq!(vc.total_assets(), 60_000_000);
+}
+
+#[test]
+fn refunding_the_sleeve_completes_a_partially_filled_claim() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _tr) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    let shares = vc.subscribe(&user, &100_000_000);
+
+    vc.deploy_capital(&60_000_000);
+    vc.request_redemption(&user, &shares);
+    vc.claim_redemption(&user); // partial: 40
+
+    vc.fund_sleeve(&60_000_000); // capital returns from treaties
+    let paid = vc.claim_redemption(&user);
+
+    assert_eq!(paid, 60_000_000);
+    assert_eq!(TokenClient::new(&e, &usdc).balance(&user), 100_000_000);
+    assert!(vc.get_redemption(&user).is_none());
+    assert_eq!(vc.total_shares(), 0);
+    assert_eq!(vc.total_assets(), 0);
+}
+
+/// A partial fill must not restart the clock: the holder already served their notice.
+#[test]
+fn partial_fill_preserves_the_original_maturity() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _tr) = deploy_with_notice_and_attestor(&e, 100);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    let shares = vc.subscribe(&user, &100_000_000);
+
+    vc.deploy_capital(&60_000_000);
+    vc.request_redemption(&user, &shares);
+    let due = vc.get_redemption(&user).unwrap().claimable_at;
+
+    e.ledger().with_mut(|l| l.timestamp = due);
+    vc.claim_redemption(&user);
+
+    assert_eq!(vc.get_redemption(&user).unwrap().claimable_at, due);
+}
+
+// ---- redemption suspension: deliberate, and never a trap ---------------------------
+
+#[test]
+#[should_panic] // RedemptionsSuspended
+fn suspension_blocks_claims() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _tr) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    let shares = vc.subscribe(&user, &100_000_000);
+    vc.request_redemption(&user, &shares);
+
+    vc.set_redemptions_suspended(&true);
+    assert!(vc.redemptions_suspended());
+    vc.claim_redemption(&user);
+}
+
+/// Deferring an exit is only acceptable if the holder can leave the queue instead.
+#[test]
+fn suspension_still_allows_queueing_and_cancelling() {
+    let e = Env::default();
+    let (vault, token, usdc, _a, _g, _tr) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    let shares = vc.subscribe(&user, &100_000_000);
+
+    vc.set_redemptions_suspended(&true);
+
+    vc.request_redemption(&user, &shares); // may still join the queue
+    vc.cancel_redemption(&user); // and may always leave it
+    assert_eq!(TokenContractClient::new(&e, &token).balance(&user), shares);
+}
+
+#[test]
+fn resuming_redemptions_restores_claims() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _tr) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    let shares = vc.subscribe(&user, &100_000_000);
+    vc.request_redemption(&user, &shares);
+
+    vc.set_redemptions_suspended(&true);
+    vc.set_redemptions_suspended(&false);
+    let paid = vc.claim_redemption(&user);
+    assert_eq!(paid, 100_000_000);
+}
+
+#[test]
+#[should_panic] // admin auth absent
+fn non_admin_cannot_suspend_redemptions() {
+    let e = Env::default();
+    let (vault, _t, _u, _a, _g, _tr) = deploy_with_attestor(&e);
+    let attacker = Address::generate(&e);
+    e.set_auths(&[]);
+    e.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &vault,
+            fn_name: "set_redemptions_suspended",
+            args: (true,).into_val(&e),
+            sub_invokes: &[],
+        },
+    }]);
+    VaultContractClient::new(&e, &vault).set_redemptions_suspended(&true);
 }

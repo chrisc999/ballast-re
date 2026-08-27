@@ -32,14 +32,19 @@ A real, on-chain run against the deployed testnet contracts (reproduce with
   `set_notice_period`, timelocked governance-gated upgrade, and swappable role setters.
   Attested NAV: `update_nav` (m-of-n quorum, bounded delta, cadence floor, proof reference,
   downward moves allowed), `update_nav_extraordinary` for catastrophe writedowns, and
-  `share_price` published for external price feeds. Planned: liquidity-sleeve management,
-  redemption queue and caps, and allowlist enforcement.
+  `share_price` published for external price feeds. Liquidity: `fund_sleeve` /
+  `deploy_capital` (NAV-neutral treasury moves), partial-fill claims that queue the
+  remainder rather than failing, and `set_redemptions_suspended`. Planned: per-period
+  redemption caps and allowlist enforcement.
 - **Escrow is always reversible** — `request_redemption` moves baUSD into the vault, so
   `cancel_redemption` is gated on nothing but the holder's own signature (not pause, not
   compliance). A request that cannot be claimed can always be undone.
 - **Roles** (separation of duties) — governance multisig (admin/upgrade), guardian
   (pause), an m-of-n attestation quorum (NAV), compliance authority (allowlist), treasury
   ops (sleeve). Designed as swappable addresses so mainnet multisig drops in later.
+- **The sleeve is not the NAV** — most capital sits in reinsurance treaties, so the vault's
+  on-chain USDC balance (`sleeve_balance`) is deliberately much smaller than `total_assets`.
+  Moving capital between the two is NAV-neutral; only `update_nav` moves NAV.
 - **NAV is attested, not traded** — baUSD has no market, so its price is published from
   off-chain treaty performance rather than discovered. NAV can fall. Routine updates are
   bounded in size and frequency; anything larger needs governance as well as the quorum.
