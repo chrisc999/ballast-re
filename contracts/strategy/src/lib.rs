@@ -174,6 +174,12 @@ impl StrategyContract {
         if held <= 0 {
             return Err(StrategyError::InsufficientBalance);
         }
+        // A request beyond the position's value is a PERMANENT condition and must say so:
+        // reporting it as InsufficientLiquidity would tell the caller to retry a
+        // withdrawal that can never succeed.
+        if amount > vault.convert_to_assets(&held) {
+            return Err(StrategyError::InsufficientBalance);
+        }
 
         // Round the required shares UP. The flooring conversion is right for pricing a
         // deposit and wrong here: it lands a stroop short of `amount` at any share price
@@ -207,8 +213,11 @@ impl StrategyContract {
         // so it needs nothing from us.
         let paid = vault.claim_redemption(&me);
 
-        // A partial fill cannot satisfy DeFindex's synchronous contract. Refuse, and let the
-        // revert undo the request too.
+        // A partial fill cannot satisfy DeFindex's synchronous contract. Refuse, and let
+        // the revert undo the request too. This check alone is sufficient: both conversions
+        // share one ratio k, so paid >= amount implies covered >= ceil(amount*k) = needed -
+        // i.e. any partial fill at the vault necessarily pays LESS than `amount` and lands
+        // here. A partially-filled-but-accepted state is unreachable by construction.
         if paid < amount {
             return Err(StrategyError::InsufficientLiquidity);
         }

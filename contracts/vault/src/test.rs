@@ -1812,3 +1812,21 @@ fn max_nav_delta_reflects_the_baseline_not_current_assets() {
     assert_eq!(vc.nav_baseline(), 1_001_500_000);
     assert_eq!(vc.max_nav_delta(), 20_030_000);
 }
+
+/// The cadence must fit inside the staleness window: an interval above it would block
+/// deposits on a schedule the operator configured themselves.
+#[test]
+#[should_panic] // CadenceTooLong
+fn nav_cadence_above_staleness_window_reverts() {
+    let e = Env::default();
+    let (vault, _t, _u, _a, _g, _o) = deploy_with_attestor(&e);
+    VaultContractClient::new(&e, &vault).set_nav_cadence(&(49 * 60 * 60)); // > 48h
+}
+
+#[test]
+#[should_panic] // InvalidAmount
+fn convert_to_shares_ceil_rejects_negative_input() {
+    let e = Env::default();
+    let (vault, _t, _u, _a, _g, _o) = deploy_with_attestor(&e);
+    VaultContractClient::new(&e, &vault).convert_to_shares_ceil(&-1);
+}

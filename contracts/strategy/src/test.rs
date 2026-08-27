@@ -348,3 +348,20 @@ fn full_exit_after_a_nav_rise_needs_the_gain_funded() {
     assert_eq!(h.strategy.shares_of(&dfx), 0);
     assert!(h.usdc_of(&recipient) >= owed);
 }
+
+/// A request beyond the position must say InsufficientBalance (permanent), never
+/// InsufficientLiquidity (retryable) - retry logic would loop on it forever.
+#[test]
+fn over_position_withdrawal_reports_insufficient_balance() {
+    let h = setup(0);
+    let dfx = h.depositor(100_000_000);
+    h.strategy.deposit(&100_000_000, &dfx);
+
+    let err = h
+        .strategy
+        .try_withdraw(&200_000_000, &dfx, &Address::generate(&h.e))
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, crate::StrategyError::InsufficientBalance);
+}

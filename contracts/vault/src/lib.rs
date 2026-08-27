@@ -264,6 +264,7 @@ pub enum Error {
     NoSharesOutstanding = 24,
     RedemptionsSuspended = 25,
     NotAllowed = 26,
+    CadenceTooLong = 29,
     SettlementAssetDepegged = 27,
     OraclePriceUnavailable = 28,
 }
@@ -1049,6 +1050,13 @@ impl VaultContract {
     /// grants no authority admin did not effectively have.
     pub fn set_nav_cadence(e: &Env, interval_secs: u64) {
         read_config(e).admin.require_auth();
+        // The cadence must fit inside the staleness window. An interval above
+        // MAX_NAV_AGE_SECS would make NAV go stale BETWEEN permitted attestations, blocking
+        // deposits on a schedule the operator configured themselves - a recurring outage
+        // that looks like an attestation failure. Mirrors set_notice_period's bound.
+        if interval_secs > MAX_NAV_AGE_SECS {
+            panic_with_error!(e, Error::CadenceTooLong);
+        }
         let s = e.storage().instance();
         s.set(&DataKey::NavInterval, &interval_secs);
         s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -1202,6 +1210,11 @@ impl VaultContract {
     /// protocol that expects an exact withdrawal amount need this - using the flooring
     /// conversion there lands a stroop short and the withdrawal fails.
     pub fn convert_to_shares_ceil(e: &Env, assets: i128) -> i128 {
+        // The ceil adjustment below is only correct for non-negative numerators; reject
+        // rather than return a silently-wrong figure.
+        if assets < 0 {
+            panic_with_error!(e, Error::InvalidAmount);
+        }
         let ts = read_i128(e, &DataKey::TotalShares);
         let ta = read_i128(e, &DataKey::TotalAssets);
         shares_for_deposit_ceil(assets, ts, ta)
