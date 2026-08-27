@@ -1,0 +1,20 @@
+[package]
+name = "ba-usd-strategy"
+description = "DeFindex strategy adapter exposing the baUSD vault as an allocatable strategy."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+# The adapter reaches the vault through a minimal #[contractclient] interface (see lib.rs)
+# rather than importing it — same reasoning as the vault/token and oracle/vault splits.
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+ba-usd-vault = { path = "../vault" }
+ba-usd-token = { path = "../token" }

@@ -4,6 +4,7 @@ members = [
     "contracts/token",
     "contracts/vault",
     "contracts/oracle",
+    "contracts/strategy",
 ]
 # Note: mock USDC for tests uses Soroban's built-in Stellar Asset Contract via
 # env.register_stellar_asset_contract_v2() in testutils — no custom mock crate

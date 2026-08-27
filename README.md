@@ -53,6 +53,12 @@ A real, on-chain run against the deployed testnet contracts (reproduce with
   *published* from attested NAV. SEP-40 is a pure interface standard, so anything that can
   already read a SEP-40 feed reads baUSD unchanged. The vault stays the single source of
   truth — the feed only ever copies `share_price()`, and `record()` is permissionless.
+- **DeFindex strategy adapter** — exposes the vault as an allocatable DeFindex strategy.
+  DeFindex's `withdraw` is synchronous and baUSD is not built to be: the adapter settles a
+  withdrawal only when the vault can honour it atomically (notice elapsed, sleeve covering
+  the full amount) and otherwise fails, which rolls the redemption request back with it so
+  no escrow is stranded. An illiquid strategy that reports its limits truthfully is safer
+  than one that pretends.
 - **Roles** (separation of duties) — governance multisig (admin/upgrade), guardian
   (pause), an m-of-n attestation quorum (NAV), compliance authority (allowlist), treasury
   ops (sleeve). Designed as swappable addresses so mainnet multisig drops in later.

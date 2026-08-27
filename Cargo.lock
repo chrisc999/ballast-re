@@ -196,6 +196,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ba-usd-strategy"
+version = "0.1.0"
+dependencies = [
+ "ba-usd-token",
+ "ba-usd-vault",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "ba-usd-token"
 version = "0.1.0"
 dependencies = [
