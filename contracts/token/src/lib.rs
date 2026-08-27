@@ -6,8 +6,14 @@
 //! `#[only_owner]`, so it requires the owner's authorization, and only the vault can
 //! produce that authorization. The vault only ever mints against real deposits.
 //!
-//! Burning and transfers are standard SEP-41 (the holder authorizes). In redemption the
-//! vault holds a redeemer's shares in escrow and burns them as the holder.
+//! Burning is ALSO owner-gated, for the same reason. The vault keeps its own bookkept
+//! `total_shares`, and a holder-initiated burn would silently desynchronize that from the
+//! token's real supply: burn 50 of a 100 supply and the vault still believes 100 shares
+//! are outstanding, so the survivors' claims no longer sum to NAV and the difference is
+//! stranded. Supply therefore moves ONLY through the vault, in both directions. The
+//! SEP-41 `burn`/`burn_from` entrypoints still exist with their standard signatures; they
+//! simply enforce an authorization policy, exactly as `mint` does. In redemption the vault
+//! holds a redeemer's shares in escrow and burns them as both owner and holder.
 //!
 //! Built on the audited OpenZeppelin `stellar-tokens` fungible base. baUSD deliberately
 //! mints NO initial supply; total supply grows only via the
@@ -15,7 +21,7 @@
 //! `FungibleBurnable`.
 
 use soroban_sdk::{contract, contractimpl, Address, Env, MuxedAddress, String};
-use stellar_access::ownable::{set_owner, Ownable};
+use stellar_access::ownable::{enforce_owner_auth, set_owner, Ownable};
 use stellar_macros::only_owner;
 use stellar_tokens::fungible::{burnable::FungibleBurnable, Base, FungibleToken};
 
@@ -87,11 +93,17 @@ impl FungibleToken for TokenContract {
 
 #[contractimpl]
 impl FungibleBurnable for TokenContract {
+    /// Burn `amount` from `from`. Owner-gated: only the vault can reduce supply, so the
+    /// vault's bookkept `total_shares` can never drift from the real total supply.
     fn burn(e: &Env, from: Address, amount: i128) {
+        enforce_owner_auth(e);
         Self::ContractType::burn(e, &from, amount)
     }
 
+    /// Allowance-based burn. Owner-gated for the same reason as `burn` — otherwise an
+    /// approved spender could destroy a holder's shares outside the vault's accounting.
     fn burn_from(e: &Env, spender: Address, from: Address, amount: i128) {
+        enforce_owner_auth(e);
         Self::ContractType::burn_from(e, &spender, &from, amount)
     }
 }

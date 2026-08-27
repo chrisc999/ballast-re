@@ -75,7 +75,7 @@ fn authenticated_non_owner_cannot_mint() {
 }
 
 #[test]
-fn holder_can_burn_their_own() {
+fn owner_can_burn() {
     let e = Env::default();
     e.mock_all_auths();
     let (_owner, id) = setup(&e);
@@ -87,6 +87,63 @@ fn holder_can_burn_their_own() {
 
     assert_eq!(client.balance(&user), 600i128);
     assert_eq!(client.total_supply(), 600i128);
+}
+
+/// Supply may move ONLY through the vault. A holder burning their own baUSD directly
+/// would leave the vault's bookkept `total_shares` above the real supply, so the
+/// remaining holders' claims would no longer sum to NAV and the difference would be
+/// stranded in the vault forever. Burn is therefore owner-gated, like mint.
+#[test]
+#[should_panic] // owner (vault) auth absent
+fn authenticated_holder_cannot_burn_directly() {
+    let e = Env::default();
+    let (_owner, id) = setup(&e);
+    let client = TokenContractClient::new(&e, &id);
+
+    let user = Address::generate(&e);
+    e.mock_all_auths();
+    client.mint(&user, &1_000i128);
+
+    // The holder authenticates for themselves, but is not the owner.
+    e.set_auths(&[]);
+    e.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &id,
+            fn_name: "burn",
+            args: (user.clone(), 400i128).into_val(&e),
+            sub_invokes: &[],
+        },
+    }]);
+    client.burn(&user, &400i128);
+}
+
+/// Same reasoning for the allowance path: an approved spender must not be able to
+/// destroy a holder's shares outside the vault's accounting.
+#[test]
+#[should_panic] // owner (vault) auth absent
+fn authenticated_spender_cannot_burn_from() {
+    let e = Env::default();
+    let (_owner, id) = setup(&e);
+    let client = TokenContractClient::new(&e, &id);
+
+    let user = Address::generate(&e);
+    let spender = Address::generate(&e);
+    e.mock_all_auths();
+    client.mint(&user, &1_000i128);
+    client.approve(&user, &spender, &500i128, &1_000u32);
+
+    e.set_auths(&[]);
+    e.mock_auths(&[MockAuth {
+        address: &spender,
+        invoke: &MockAuthInvoke {
+            contract: &id,
+            fn_name: "burn_from",
+            args: (spender.clone(), user.clone(), 400i128).into_val(&e),
+            sub_invokes: &[],
+        },
+    }]);
+    client.burn_from(&spender, &user, &400i128);
 }
 
 #[test]

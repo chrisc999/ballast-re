@@ -11,7 +11,7 @@
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
-    panic_with_error, symbol_short, token::TokenClient, Address, BytesN, Env, Symbol,
+    panic_with_error, symbol_short, token::TokenClient, Address, BytesN, Env, Symbol, Vec,
 };
 
 /// Minimal client for baUSD's owner-only admin interface. Lets the vault call `mint`
@@ -27,9 +27,10 @@ pub trait BaUsdAdmin {
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = INSTANCE_BUMP_AMOUNT - DAY_IN_LEDGERS;
-// Per-user redemption requests live in persistent storage; bump on access too.
+// Per-user redemption requests live in persistent storage; bump on access too. The
+// threshold is derived per-entry in `bump_request_ttl`, since a request's window depends
+// on the notice period it was created under.
 const PERSISTENT_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
-const PERSISTENT_LIFETIME_THRESHOLD: u32 = PERSISTENT_BUMP_AMOUNT - DAY_IN_LEDGERS;
 
 // --- Share-math virtual offset (defense-in-depth) ----------------------------------
 // The primary inflation vector is already closed by bookkept NAV (see module docs);
@@ -41,8 +42,39 @@ const VIRTUAL_SHARES: i128 = 1;
 /// 7 decimals.
 const MIN_INITIAL_DEPOSIT: i128 = 10_000_000;
 
-/// Governance upgrade timelock. 24h default; the duration is a config parameter.
+/// Governance upgrade timelock, fixed at 24h at compile time. Deliberately NOT a config
+/// parameter: an admin who can shorten the timelock has defeated it, so changing this
+/// requires a contract upgrade, which is itself subject to the current timelock.
 const UPGRADE_TIMELOCK_SECS: u64 = 86_400;
+
+/// Soroban ledgers close on a ~5s cadence. Used to size redemption-request TTLs in
+/// ledgers from a notice period expressed in seconds.
+const SECS_PER_LEDGER: u64 = 5;
+
+/// Basis-point denominator for the NAV delta bound.
+const BPS_DENOM: i128 = 10_000;
+
+/// Maximum NAV move per routine attestation, in basis points (2%). Reinsurance NAV moves
+/// slowly in normal conditions; anything larger is either an error or a catastrophe, and
+/// both deserve the extraordinary path rather than a routine update.
+const MAX_NAV_DELTA_BPS: i128 = 200;
+
+/// Minimum spacing between routine NAV updates (~20h). Without a cadence floor the delta
+/// cap is far weaker than it looks: repeated small updates could walk NAV a long way in a
+/// short time.
+const MIN_NAV_INTERVAL_SECS: u64 = 20 * 60 * 60;
+
+/// NAV older than this (48h - roughly two missed daily cycles) is stale. Stale NAV blocks
+/// NEW DEPOSITS only; exits are never blocked, since an operational failure to attest is
+/// the vault's fault and must not trap an LP's capital.
+const MAX_NAV_AGE_SECS: u64 = 48 * 60 * 60;
+
+/// Share price is reported scaled by 10^7, matching baUSD's decimals.
+const PRICE_SCALE: i128 = 10_000_000;
+
+/// Upper bound on the redemption notice period (90 days). Bounded so a request's storage
+/// entry can always be kept alive past its own maturity - see `request_ttl_ledgers`.
+const MAX_NOTICE_PERIOD_SECS: u64 = 90 * 24 * 60 * 60;
 
 // --- Events (consumed by indexers and any monitoring dashboard) --------------------
 #[contractevent]
@@ -75,6 +107,35 @@ pub struct RedemptionClaimed {
     pub from: Address,
     pub shares: i128,
     pub assets: i128,
+}
+#[contractevent]
+pub struct NavUpdated {
+    pub old_total_assets: i128,
+    pub new_total_assets: i128,
+    #[topic]
+    pub proof_ref: BytesN<32>,
+    /// True when the move exceeded the routine delta cap and took the governance path.
+    pub extraordinary: bool,
+}
+#[contractevent]
+pub struct AttestorsUpdated {
+    pub count: u32,
+    pub threshold: u32,
+}
+#[contractevent]
+pub struct RedemptionCancelled {
+    #[topic]
+    pub from: Address,
+    pub shares: i128,
+}
+#[contractevent]
+pub struct AdminProposed {
+    #[topic]
+    pub new_admin: Address,
+}
+#[contractevent]
+pub struct NoticePeriodUpdated {
+    pub notice_period: u64,
 }
 #[contractevent]
 pub struct PauseSet {
@@ -114,6 +175,16 @@ pub enum Error {
     InsufficientSleeve = 12,
     NoPendingUpgrade = 13,
     TimelockNotElapsed = 14,
+    NoticeTooLong = 15,
+    NoPendingAdmin = 16,
+    NavStale = 17,
+    NavDeltaTooLarge = 18,
+    NavTooSoon = 19,
+    InsufficientAttestations = 20,
+    UnknownAttestor = 21,
+    DuplicateAttestor = 22,
+    InvalidThreshold = 23,
+    NoSharesOutstanding = 24,
 }
 
 /// Vault configuration and role addresses. Separation of duties: each authority can do
@@ -123,13 +194,13 @@ pub enum Error {
 #[contracttype]
 #[derive(Clone)]
 pub struct Config {
-    pub admin: Address,                 // governance: upgrade + authority setters
-    pub guardian: Address,              // pause only
-    pub attestation_authority: Address, // update_nav only
-    pub compliance_authority: Address,  // allowlist only
-    pub treasury: Address,              // sleeve in/out only
-    pub usdc: Address,                  // USDC Stellar Asset Contract
-    pub notice_period: u64,             // redemption notice, seconds (0 on testnet demo)
+    pub admin: Address,                // governance: upgrade + authority setters
+    pub guardian: Address,             // pause only
+    pub compliance_authority: Address, // allowlist only
+    pub treasury: Address,             // sleeve in/out only
+    pub usdc: Address,                 // USDC Stellar Asset Contract
+    pub notice_period: u64,            // redemption notice, seconds
+                                       // NAV attestation is an m-of-n SET, not a single address - see DataKey::Attestors.
 }
 
 /// A pending redemption. Shares are escrowed in the vault at request time; the payout is
@@ -158,6 +229,9 @@ pub enum DataKey {
     TotalAssets,    // bookkept NAV
     NavLastUpdated, // freshness timestamp (used by update_nav)
     Paused,
+    Attestors,            // Vec<Address> authorized to attest NAV
+    AttestationThreshold, // m of n: how many of them must sign one update
+    PendingAdmin,         // admin handover awaiting acceptance by the proposed address
     PendingUpgrade,
     Redemption(Address), // per-user pending redemption (persistent storage)
 }
@@ -180,10 +254,12 @@ impl VaultContract {
         usdc: Address,
         notice_period: u64,
     ) {
+        if notice_period > MAX_NOTICE_PERIOD_SECS {
+            panic_with_error!(e, Error::NoticeTooLong);
+        }
         let config = Config {
             admin,
             guardian,
-            attestation_authority,
             compliance_authority,
             treasury,
             usdc,
@@ -191,6 +267,14 @@ impl VaultContract {
         };
         let s = e.storage().instance();
         s.set(&DataKey::Config, &config);
+        // Seed a 1-of-1 attestor set from the deploy-time authority. Governance widens it
+        // to a real m-of-n quorum via `set_attestors` before any capital is at risk; the
+        // code path is identical either way, so there is no special-case single-signer
+        // branch to get wrong later.
+        let mut seed = Vec::new(e);
+        seed.push_back(attestation_authority);
+        s.set(&DataKey::Attestors, &seed);
+        s.set(&DataKey::AttestationThreshold, &1u32);
         s.set(&DataKey::TotalShares, &0i128);
         s.set(&DataKey::TotalAssets, &0i128);
         s.set(&DataKey::NavLastUpdated, &e.ledger().timestamp());
@@ -221,6 +305,9 @@ impl VaultContract {
         from.require_auth();
         ensure_not_paused(e);
         ensure_allowed(e, &from);
+        // Never sell shares at a price we cannot currently vouch for. Exits deliberately
+        // carry no such gate.
+        ensure_nav_fresh(e);
         if amount <= 0 {
             panic_with_error!(e, Error::InvalidAmount);
         }
@@ -242,9 +329,17 @@ impl VaultContract {
         }
 
         // Effects: update bookkept totals first (a later failed transfer reverts all of it).
+        // Checked so an overflow surfaces as a typed MathOverflow the dApp can render,
+        // rather than an opaque wasm trap.
+        let new_ta = ta
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
+        let new_ts = ts
+            .checked_add(shares)
+            .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
         let s = e.storage().instance();
-        s.set(&DataKey::TotalAssets, &(ta + amount));
-        s.set(&DataKey::TotalShares, &(ts + shares));
+        s.set(&DataKey::TotalAssets, &new_ta);
+        s.set(&DataKey::TotalShares, &new_ts);
         s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         // Interactions: pull USDC into the vault, then mint baUSD. USDC is a
@@ -298,13 +393,19 @@ impl VaultContract {
         // Escrow the redeemer's baUSD into the vault (reverts if their balance is short).
         TokenClient::new(e, &token_addr).transfer(&from, e.current_contract_address(), &shares);
 
+        let claimable_at = e
+            .ledger()
+            .timestamp()
+            .checked_add(config.notice_period)
+            .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
         let req = RedemptionRequest {
             shares,
-            claimable_at: e.ledger().timestamp() + config.notice_period,
+            claimable_at,
         };
-        let p = e.storage().persistent();
-        p.set(&key, &req);
-        p.extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        e.storage().persistent().set(&key, &req);
+        // TTL must outlive the notice period, or the entry archives before it can ever be
+        // claimed and the escrowed shares are only recoverable via state restoration.
+        bump_request_ttl(e, &key, config.notice_period);
 
         RedemptionRequested {
             from,
@@ -318,6 +419,10 @@ impl VaultContract {
     pub fn claim_redemption(e: &Env, from: Address) {
         from.require_auth();
         ensure_not_paused(e);
+        // Claims ARE compliance-gated: this pays USDC out of the vault. `cancel_redemption`
+        // deliberately is not, so a de-allowlisted holder can always recover their own
+        // escrowed shares even while barred from exiting to cash.
+        ensure_allowed(e, &from);
 
         let key = DataKey::Redemption(from.clone());
         let req: RedemptionRequest = e
@@ -331,6 +436,9 @@ impl VaultContract {
         }
 
         let config = read_config(e);
+        // Keep the entry alive on access: a claim that reverts below (short sleeve, pause)
+        // must not leave the request closer to archival than it started.
+        bump_request_ttl(e, &key, config.notice_period);
         let token_addr = read_token(e);
         let ts = read_i128(e, &DataKey::TotalShares);
         let ta = read_i128(e, &DataKey::TotalAssets);
@@ -347,10 +455,19 @@ impl VaultContract {
             panic_with_error!(e, Error::InsufficientSleeve);
         }
 
-        // Effects: shrink bookkept totals and drop the request.
+        // Effects: shrink bookkept totals and drop the request. The totals must actually
+        // cover what is leaving; enforce that rather than assuming the invariant holds.
+        let new_ts = ts
+            .checked_sub(req.shares)
+            .filter(|v| *v >= 0)
+            .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
+        let new_ta = ta
+            .checked_sub(assets)
+            .filter(|v| *v >= 0)
+            .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
         let s = e.storage().instance();
-        s.set(&DataKey::TotalShares, &(ts - req.shares));
-        s.set(&DataKey::TotalAssets, &(ta - assets));
+        s.set(&DataKey::TotalShares, &new_ts);
+        s.set(&DataKey::TotalAssets, &new_ta);
         s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         e.storage().persistent().remove(&key);
 
@@ -366,21 +483,110 @@ impl VaultContract {
         .publish(e);
     }
 
-    /// The caller's pending redemption, if any.
+    /// Cancel a pending redemption and take back the escrowed baUSD.
+    ///
+    /// Deliberately gated on NOTHING but the caller's own auth - not pause, not the
+    /// allowlist. This returns the caller's own shares and moves no USDC, so blocking it
+    /// would recreate exactly the trap it exists to prevent: shares escrowed, claim
+    /// impossible (short sleeve, pause, or a NAV the holder will not accept), and no way
+    /// out. A request that cannot be claimed must always be reversible.
+    pub fn cancel_redemption(e: &Env, from: Address) {
+        from.require_auth();
+
+        let key = DataKey::Redemption(from.clone());
+        let req: RedemptionRequest = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(e, Error::NoRequest));
+
+        let token_addr = read_token(e);
+
+        // Effects before interactions: drop the request, then release the escrow.
+        e.storage().persistent().remove(&key);
+        TokenClient::new(e, &token_addr).transfer(
+            &e.current_contract_address(),
+            &from,
+            &req.shares,
+        );
+
+        RedemptionCancelled {
+            from,
+            shares: req.shares,
+        }
+        .publish(e);
+    }
+
+    /// The caller's pending redemption, if any. Bumps the entry's TTL on access.
     pub fn get_redemption(e: &Env, who: Address) -> Option<RedemptionRequest> {
-        e.storage().persistent().get(&DataKey::Redemption(who))
+        let key = DataKey::Redemption(who);
+        let found: Option<RedemptionRequest> = e.storage().persistent().get(&key);
+        if found.is_some() {
+            bump_request_ttl(e, &key, read_config(e).notice_period);
+        }
+        found
     }
 
     // --- authority setters (governance/admin only; swap roles without redeploy) -----
 
-    pub fn set_admin(e: &Env, new_admin: Address) {
+    /// Step 1 of the admin handover: nominate `new_admin`. Nothing changes yet.
+    ///
+    /// Two-step by design, unlike the other authority setters. Admin is the only role
+    /// that can destroy its own recovery path: a single-step handover to a mistyped or
+    /// uncontrollable address would permanently disable every admin-gated function,
+    /// INCLUDING upgrade - the escape hatch for any other bug - with user funds inside.
+    /// Requiring the nominee to accept makes an unreachable address unreachable by
+    /// construction. A fresh proposal replaces any pending one.
+    pub fn propose_admin(e: &Env, new_admin: Address) {
+        read_config(e).admin.require_auth();
+        let s = e.storage().instance();
+        s.set(&DataKey::PendingAdmin, &new_admin);
+        s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        AdminProposed { new_admin }.publish(e);
+    }
+
+    /// Step 2 of the admin handover: the nominated address claims the role, proving it
+    /// can actually authorize. Only the pending admin can call this.
+    pub fn accept_admin(e: &Env) {
+        let pending: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(e, Error::NoPendingAdmin));
+        pending.require_auth();
+
         let mut c = read_config(e);
-        c.admin.require_auth();
-        c.admin = new_admin.clone();
+        c.admin = pending.clone();
         write_config(e, &c);
+        e.storage().instance().remove(&DataKey::PendingAdmin);
+
         AuthorityUpdated {
             role: symbol_short!("admin"),
-            new: new_admin,
+            new: pending,
+        }
+        .publish(e);
+    }
+
+    pub fn get_pending_admin(e: &Env) -> Option<Address> {
+        e.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Adjust the redemption notice period. Admin-gated and bounded by
+    /// `MAX_NOTICE_PERIOD_SECS`.
+    ///
+    /// NOT retroactive: `RedemptionRequest` stores an absolute `claimable_at` fixed when
+    /// the request was made, so already-pending requests keep the terms they were made
+    /// under and governance cannot extend a lockup on capital already in the queue.
+    pub fn set_notice_period(e: &Env, new_notice_period: u64) {
+        let mut c = read_config(e);
+        c.admin.require_auth();
+        if new_notice_period > MAX_NOTICE_PERIOD_SECS {
+            panic_with_error!(e, Error::NoticeTooLong);
+        }
+        c.notice_period = new_notice_period;
+        write_config(e, &c);
+        NoticePeriodUpdated {
+            notice_period: new_notice_period,
         }
         .publish(e);
     }
@@ -397,16 +603,45 @@ impl VaultContract {
         .publish(e);
     }
 
-    pub fn set_attestation_authority(e: &Env, new_authority: Address) {
-        let mut c = read_config(e);
-        c.admin.require_auth();
-        c.attestation_authority = new_authority.clone();
-        write_config(e, &c);
-        AuthorityUpdated {
-            role: symbol_short!("attest"),
-            new: new_authority,
+    /// Replace the NAV attestation quorum. Admin-gated.
+    ///
+    /// `threshold` must be at least 1 and no greater than the number of attestors -
+    /// a threshold above the set size would make NAV permanently un-updatable, and a
+    /// threshold of zero would let anyone attest.
+    pub fn set_attestors(e: &Env, attestors: Vec<Address>, threshold: u32) {
+        read_config(e).admin.require_auth();
+        if threshold == 0 || threshold > attestors.len() {
+            panic_with_error!(e, Error::InvalidThreshold);
+        }
+        // Duplicates in the set would let one key satisfy several slots of the quorum.
+        let n = attestors.len();
+        for i in 0..n {
+            let a = attestors.get(i).unwrap();
+            for j in 0..i {
+                if attestors.get(j).unwrap() == a {
+                    panic_with_error!(e, Error::DuplicateAttestor);
+                }
+            }
+        }
+
+        let s = e.storage().instance();
+        s.set(&DataKey::Attestors, &attestors);
+        s.set(&DataKey::AttestationThreshold, &threshold);
+        s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        AttestorsUpdated {
+            count: n,
+            threshold,
         }
         .publish(e);
+    }
+
+    pub fn get_attestors(e: &Env) -> Vec<Address> {
+        read_attestors(e)
+    }
+
+    pub fn get_attestation_threshold(e: &Env) -> u32 {
+        read_threshold(e)
     }
 
     pub fn set_compliance_authority(e: &Env, new_authority: Address) {
@@ -433,13 +668,91 @@ impl VaultContract {
         .publish(e);
     }
 
+    // --- NAV attestation ------------------------------------------------------------
+
+    /// Write a new attested NAV. Requires `threshold`-of-`n` attestor signatures on one
+    /// transaction, plus a `proof_ref` hash committing to the off-chain attestation
+    /// document.
+    ///
+    /// NAV MAY DECREASE - reinsurance NAV is not a yield curve, and a treaty loss is a real
+    /// downward move. Routine updates are bounded two ways: at most `MAX_NAV_DELTA_BPS` per
+    /// update, and no more often than `MIN_NAV_INTERVAL_SECS`. The cadence floor is what
+    /// makes the delta cap meaningful; without it, repeated small updates could walk NAV
+    /// anywhere in an afternoon.
+    ///
+    /// Deliberately callable while paused: pausing halts user flows, but the books should
+    /// still be able to record reality, and with subscribe/claim frozen an update has no
+    /// exploitable surface.
+    pub fn update_nav(
+        e: &Env,
+        new_total_assets: i128,
+        proof_ref: BytesN<32>,
+        signers: Vec<Address>,
+    ) {
+        require_attestations(e, &signers);
+        let old = prepare_nav_update(e, new_total_assets);
+        ensure_nav_cadence(e);
+        ensure_nav_delta_within_bound(e, old, new_total_assets);
+        commit_nav(e, old, new_total_assets, proof_ref, false);
+    }
+
+    /// Write a NAV that exceeds the routine delta cap - a catastrophe writedown, or a
+    /// correction after a missed cycle.
+    ///
+    /// Requires the attestor quorum AND governance, so a large move is always possible but
+    /// can never be made quietly by the attestation quorum alone. The cadence floor and
+    /// delta cap are waived; everything else (non-negative, shares outstanding, proof_ref,
+    /// event) still applies, and the event marks it `extraordinary` so it is trivially
+    /// auditable after the fact.
+    pub fn update_nav_extraordinary(
+        e: &Env,
+        new_total_assets: i128,
+        proof_ref: BytesN<32>,
+        signers: Vec<Address>,
+    ) {
+        read_config(e).admin.require_auth();
+        require_attestations(e, &signers);
+        let old = prepare_nav_update(e, new_total_assets);
+        commit_nav(e, old, new_total_assets, proof_ref, true);
+    }
+
+    pub fn nav_last_updated(e: &Env) -> u64 {
+        read_nav_last_updated(e)
+    }
+
+    /// Whether NAV is older than `MAX_NAV_AGE_SECS`. Stale NAV blocks new deposits; it
+    /// never blocks redemption requests, claims, or cancels.
+    pub fn is_nav_stale(e: &Env) -> bool {
+        e.ledger()
+            .timestamp()
+            .saturating_sub(read_nav_last_updated(e))
+            > MAX_NAV_AGE_SECS
+    }
+
+    /// Assets per 1.0 baUSD, scaled by 10^7 (baUSD's decimals).
+    ///
+    /// The vault is the single source of truth for baUSD's price. baUSD does not trade on
+    /// any market, so price cannot be discovered - it is published from attested NAV. An
+    /// external SEP-40 price-feed adapter reads this, which is why it is exposed at a
+    /// fixed scale rather than left for callers to derive.
+    pub fn share_price(e: &Env) -> i128 {
+        let ts = read_i128(e, &DataKey::TotalShares);
+        let ta = read_i128(e, &DataKey::TotalAssets);
+        assets_for_shares(PRICE_SCALE, ts, ta)
+            .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow))
+    }
+
     // --- governance-gated upgrade with timelock -------------------------------------
 
     /// Queue an upgrade to `new_wasm_hash`, executable after the timelock. Admin-only.
     /// A fresh proposal replaces any pending one.
     pub fn propose_upgrade(e: &Env, new_wasm_hash: BytesN<32>) {
         read_config(e).admin.require_auth();
-        let eta = e.ledger().timestamp() + UPGRADE_TIMELOCK_SECS;
+        let eta = e
+            .ledger()
+            .timestamp()
+            .checked_add(UPGRADE_TIMELOCK_SECS)
+            .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
         let s = e.storage().instance();
         s.set(
             &DataKey::PendingUpgrade,
@@ -536,6 +849,143 @@ fn ensure_not_paused(e: &Env) {
 /// Allowlist compliance gate — currently a no-op (everyone allowed). Populating and
 /// enforcing the list here later keeps subscribe/redeem the same shape.
 fn ensure_allowed(_e: &Env, _who: &Address) {}
+
+fn read_attestors(e: &Env) -> Vec<Address> {
+    e.storage()
+        .instance()
+        .get(&DataKey::Attestors)
+        .unwrap_or_else(|| panic_with_error!(e, Error::NotInitialized))
+}
+
+fn read_threshold(e: &Env) -> u32 {
+    e.storage()
+        .instance()
+        .get(&DataKey::AttestationThreshold)
+        .unwrap_or_else(|| panic_with_error!(e, Error::NotInitialized))
+}
+
+fn read_nav_last_updated(e: &Env) -> u64 {
+    e.storage()
+        .instance()
+        .get(&DataKey::NavLastUpdated)
+        .unwrap_or_else(|| panic_with_error!(e, Error::NotInitialized))
+}
+
+/// Verify an m-of-n attestation: every signer must be a known attestor, no signer may be
+/// counted twice, at least `threshold` of them must sign, and each must authorize THIS
+/// invocation. Auth is enforced per signer via `require_auth`, so there is no bespoke
+/// signature verification to get wrong - Soroban's own auth framework does the checking.
+fn require_attestations(e: &Env, signers: &Vec<Address>) {
+    let attestors = read_attestors(e);
+    let threshold = read_threshold(e);
+
+    if signers.len() < threshold {
+        panic_with_error!(e, Error::InsufficientAttestations);
+    }
+
+    let n = signers.len();
+    for i in 0..n {
+        let signer = signers.get(i).unwrap();
+
+        let mut known = false;
+        for a in attestors.iter() {
+            if a == signer {
+                known = true;
+                break;
+            }
+        }
+        if !known {
+            panic_with_error!(e, Error::UnknownAttestor);
+        }
+
+        // One key must not fill several slots of the quorum.
+        for j in 0..i {
+            if signers.get(j).unwrap() == signer {
+                panic_with_error!(e, Error::DuplicateAttestor);
+            }
+        }
+
+        signer.require_auth();
+    }
+}
+
+/// Shared validation for both NAV paths. Returns the previous NAV.
+fn prepare_nav_update(e: &Env, new_total_assets: i128) -> i128 {
+    if new_total_assets < 0 {
+        panic_with_error!(e, Error::InvalidAmount);
+    }
+    // With no shares outstanding there is nothing to revalue, and a nonzero NAV against
+    // zero shares would hand the entire balance to the next depositor.
+    if read_i128(e, &DataKey::TotalShares) == 0 {
+        panic_with_error!(e, Error::NoSharesOutstanding);
+    }
+    read_i128(e, &DataKey::TotalAssets)
+}
+
+fn ensure_nav_cadence(e: &Env) {
+    let last = read_nav_last_updated(e);
+    if e.ledger().timestamp() < last.saturating_add(MIN_NAV_INTERVAL_SECS) {
+        panic_with_error!(e, Error::NavTooSoon);
+    }
+}
+
+/// |new - old| must be within MAX_NAV_DELTA_BPS of old. Multiply before divide - in fact
+/// never divide at all - so the bound is exact at any magnitude.
+fn ensure_nav_delta_within_bound(e: &Env, old: i128, new: i128) {
+    let diff = if new > old { new - old } else { old - new };
+    let lhs = diff
+        .checked_mul(BPS_DENOM)
+        .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
+    let rhs = old
+        .checked_mul(MAX_NAV_DELTA_BPS)
+        .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
+    if lhs > rhs {
+        panic_with_error!(e, Error::NavDeltaTooLarge);
+    }
+}
+
+fn commit_nav(e: &Env, old: i128, new: i128, proof_ref: BytesN<32>, extraordinary: bool) {
+    let s = e.storage().instance();
+    s.set(&DataKey::TotalAssets, &new);
+    s.set(&DataKey::NavLastUpdated, &e.ledger().timestamp());
+    s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    NavUpdated {
+        old_total_assets: old,
+        new_total_assets: new,
+        proof_ref,
+        extraordinary,
+    }
+    .publish(e);
+}
+
+fn ensure_nav_fresh(e: &Env) {
+    if e.ledger()
+        .timestamp()
+        .saturating_sub(read_nav_last_updated(e))
+        > MAX_NAV_AGE_SECS
+    {
+        panic_with_error!(e, Error::NavStale);
+    }
+}
+
+/// TTL for a redemption request, in ledgers: the standard persistent window PLUS the
+/// notice period. A request must never archive before it becomes claimable, otherwise the
+/// escrowed shares are recoverable only through state restoration rather than the
+/// contract's own interface. `notice_period` is bounded by `MAX_NOTICE_PERIOD_SECS` so
+/// this cannot exceed Soroban's maximum entry TTL.
+fn request_ttl_ledgers(notice_period: u64) -> u32 {
+    let notice_ledgers = (notice_period / SECS_PER_LEDGER) as u32;
+    PERSISTENT_BUMP_AMOUNT.saturating_add(notice_ledgers)
+}
+
+/// Extend a redemption request's TTL on access.
+fn bump_request_ttl(e: &Env, key: &DataKey, notice_period: u64) {
+    let extend_to = request_ttl_ledgers(notice_period);
+    let threshold = extend_to.saturating_sub(DAY_IN_LEDGERS);
+    e.storage()
+        .persistent()
+        .extend_ttl(key, threshold, extend_to);
+}
 
 fn read_config(e: &Env) -> Config {
     e.storage()

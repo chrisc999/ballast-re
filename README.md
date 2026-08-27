@@ -27,12 +27,23 @@ A real, on-chain run against the deployed testnet contracts (reproduce with
   base). Mint/burn authority is held **exclusively** by the vault contract. No
   discretionary issuance.
 - **Vault** — appreciating-share accounting (ERC-4626-equivalent). Implemented:
-  `subscribe`, `request_redemption`, `claim_redemption`, guardian `pause`/`unpause`,
-  timelocked governance-gated upgrade, and swappable role setters. Planned: attested
-  `update_nav`, liquidity-sleeve management, and allowlist enforcement.
+  `subscribe`, `request_redemption`, `claim_redemption`, `cancel_redemption`, guardian
+  `pause`/`unpause`, a two-step admin handover (`propose_admin`/`accept_admin`),
+  `set_notice_period`, timelocked governance-gated upgrade, and swappable role setters.
+  Attested NAV: `update_nav` (m-of-n quorum, bounded delta, cadence floor, proof reference,
+  downward moves allowed), `update_nav_extraordinary` for catastrophe writedowns, and
+  `share_price` published for external price feeds. Planned: liquidity-sleeve management,
+  redemption queue and caps, and allowlist enforcement.
+- **Escrow is always reversible** — `request_redemption` moves baUSD into the vault, so
+  `cancel_redemption` is gated on nothing but the holder's own signature (not pause, not
+  compliance). A request that cannot be claimed can always be undone.
 - **Roles** (separation of duties) — governance multisig (admin/upgrade), guardian
-  (pause), attestation authority (NAV), compliance authority (allowlist), treasury ops
-  (sleeve). Designed as swappable addresses so mainnet multisig drops in later.
+  (pause), an m-of-n attestation quorum (NAV), compliance authority (allowlist), treasury
+  ops (sleeve). Designed as swappable addresses so mainnet multisig drops in later.
+- **NAV is attested, not traded** — baUSD has no market, so its price is published from
+  off-chain treaty performance rather than discovered. NAV can fall. Routine updates are
+  bounded in size and frequency; anything larger needs governance as well as the quorum.
+  Stale NAV blocks new deposits and never blocks exits.
 
 ## Toolchain (pinned)
 
