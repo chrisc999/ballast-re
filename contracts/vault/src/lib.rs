@@ -97,10 +97,10 @@ const BPS_DENOM: i128 = 10_000;
 /// both deserve the extraordinary path rather than a routine update.
 const MAX_NAV_DELTA_BPS: i128 = 200;
 
-/// Minimum spacing between routine NAV updates (~20h). Without a cadence floor the delta
-/// cap is far weaker than it looks: repeated small updates could walk NAV a long way in a
-/// short time.
-const MIN_NAV_INTERVAL_SECS: u64 = 20 * 60 * 60;
+/// Default minimum spacing between routine NAV updates (~20h). Without a cadence floor the
+/// delta cap is far weaker than it looks: repeated small updates could walk NAV a long way
+/// in a short time. Governable via `set_nav_cadence` - see there for the trade-off.
+const DEFAULT_NAV_INTERVAL_SECS: u64 = 20 * 60 * 60;
 
 /// NAV older than this (48h - roughly two missed daily cycles) is stale. Stale NAV blocks
 /// NEW DEPOSITS only; exits are never blocked, since an operational failure to attest is
@@ -194,6 +194,10 @@ pub struct NavUpdated {
 pub struct AttestorsUpdated {
     pub count: u32,
     pub threshold: u32,
+}
+#[contractevent]
+pub struct NavCadenceUpdated {
+    pub interval_secs: u64,
 }
 #[contractevent]
 pub struct RedemptionCancelled {
@@ -306,6 +310,7 @@ pub enum DataKey {
     TotalAssets,    // bookkept NAV
     NavLastUpdated, // freshness timestamp (used by update_nav)
     NavBaseline,    // total_assets as of the last attestation; bounds the delta cap
+    NavInterval,    // minimum spacing between routine attestations, seconds
     Paused,
     PriceOracle,          // optional SEP-40 feed used as a USDC depeg guard
     PriceOracleAsset,     // the Asset identifier this feed knows USDC by
@@ -990,7 +995,7 @@ impl VaultContract {
     ///
     /// NAV MAY DECREASE - reinsurance NAV is not a yield curve, and a treaty loss is a real
     /// downward move. Routine updates are bounded two ways: at most `MAX_NAV_DELTA_BPS` per
-    /// update, and no more often than `MIN_NAV_INTERVAL_SECS`. The cadence floor is what
+    /// update, and no more often than the configured cadence. The cadence floor is what
     /// makes the delta cap meaningful; without it, repeated small updates could walk NAV
     /// anywhere in an afternoon.
     ///
@@ -1028,6 +1033,30 @@ impl VaultContract {
         require_attestations(e, &signers);
         let old = prepare_nav_update(e, new_total_assets);
         commit_nav(e, old, new_total_assets, proof_ref, true);
+    }
+
+    /// Set the minimum spacing between routine NAV attestations. Admin-gated.
+    ///
+    /// The cadence floor is what gives the delta cap its teeth: without it, repeated
+    /// within-cap updates could walk NAV a long way in a short time. Lowering it therefore
+    /// WEAKENS that protection, and zero removes it entirely, leaving only the per-update
+    /// size cap. Mainnet governance should set this to the real attestation cadence and
+    /// leave it alone. It exists as a setting because testnet and demos need a short
+    /// interval, and because the right production value is an operational fact rather than
+    /// something to hardcode.
+    ///
+    /// Same trust model as `set_notice_period`: admin already controls upgrade, so this
+    /// grants no authority admin did not effectively have.
+    pub fn set_nav_cadence(e: &Env, interval_secs: u64) {
+        read_config(e).admin.require_auth();
+        let s = e.storage().instance();
+        s.set(&DataKey::NavInterval, &interval_secs);
+        s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        NavCadenceUpdated { interval_secs }.publish(e);
+    }
+
+    pub fn nav_cadence(e: &Env) -> u64 {
+        read_nav_interval(e)
     }
 
     pub fn nav_last_updated(e: &Env) -> u64 {
@@ -1290,9 +1319,16 @@ fn prepare_nav_update(e: &Env, new_total_assets: i128) -> i128 {
     read_i128(e, &DataKey::TotalAssets)
 }
 
+fn read_nav_interval(e: &Env) -> u64 {
+    e.storage()
+        .instance()
+        .get(&DataKey::NavInterval)
+        .unwrap_or(DEFAULT_NAV_INTERVAL_SECS)
+}
+
 fn ensure_nav_cadence(e: &Env) {
     let last = read_nav_last_updated(e);
-    if e.ledger().timestamp() < last.saturating_add(MIN_NAV_INTERVAL_SECS) {
+    if e.ledger().timestamp() < last.saturating_add(read_nav_interval(e)) {
         panic_with_error!(e, Error::NavTooSoon);
     }
 }

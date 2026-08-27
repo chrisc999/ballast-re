@@ -115,20 +115,34 @@ Mock USDC in tests is Soroban's built-in Stellar Asset Contract
 
 ## Testnet deployment
 
-One command deploys mock USDC + vault + baUSD token and wires them:
+One command deploys mock USDC + vault + baUSD token + price feed + strategy adapter and
+wires them together:
 
 ```bash
 ./scripts/deploy_testnet.sh     # writes deploy/testnet.json
 ./scripts/demo_testnet.sh       # runs deposit -> mint -> redeem on-chain
 ```
 
+Always a **fresh** deploy rather than an in-place wasm upgrade: the vault's `Config` shape
+and storage key set have changed across versions, so swapping the wasm under a live instance
+would leave the stored config undeserializable. New addresses per deploy is correct here.
+
 Live testnet contract IDs (see [`deploy/testnet.json`](deploy/testnet.json)):
 
 | Contract | ID |
 |---|---|
-| Vault | `CCKMAPT5JPPO4QIAYNU225OBWFJISZL72PSKB4I2B6Y227JUJ7RQ5JCO` |
-| baUSD token | `CBH5TF432BVE7GPZMTVQGM57E7357S2MZRHPFAI5FUTU7KKXS7RXRU4P` |
+| Vault | `CDXX6SSW7L2AAIIMDHGOLD56SO5P4N7W4CM5YGVUZEDTTTWL7XOSPVFF` |
+| baUSD token | `CA3EPCTHEGWL4WN45S6RGGOTUHFLIC2MZISXICPCFZB5Q3SO572ZGZ5M` |
+| SEP-40 price feed | `CBG5KBSM7FNFS6S4PFSG6EA77JF5SM62PXVIKRM7AKOEDOMMWAC3WHJR` |
+| DeFindex strategy | `CDB5NU4C7YATSZ4I6HCFI55PYO3J3KNXWAQT3O5NR4MDWFB7TGLXV4EE` |
 | Mock USDC (SAC) | `CAJBB6LISKXJN5ON2CCFTGPGEUMK7RNH3SGWIXXHD6Z4NFWZTWKINW2U` |
+
+**NAV cadence on testnet** is set to 60s rather than the 20h default, so the
+attestation flow is demonstrable immediately after deploy. Mainnet governance sets this to
+the real attestation cadence.
+
+**The depeg guard is unconfigured on testnet** — the mock USDC below is ours and no public
+oracle carries it. On mainnet, `set_price_oracle` points it at a real SEP-40 feed.
 
 **USDC on testnet:** we deploy our own mock USDC as a classic asset wrapped in a Stellar
 Asset Contract (issuer = deployer), so accounts establish a trustline exactly as they would

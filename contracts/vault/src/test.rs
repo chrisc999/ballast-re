@@ -1743,3 +1743,42 @@ fn shares_ceil_conversion_guarantees_the_payout() {
     // Costs the caller at most one extra share.
     assert_eq!(ceiled, floored + 1);
 }
+
+#[test]
+fn nav_cadence_defaults_and_is_governable() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, attestor) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    assert_eq!(vc.nav_cadence(), 20 * 60 * 60);
+
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 200_000_000);
+    vc.subscribe(&user, &100_000_000);
+
+    // Shortening the cadence lets attestations land sooner - the reason the setting exists,
+    // and equally the reason it weakens the walk-protection.
+    vc.set_nav_cadence(&60);
+    assert_eq!(vc.nav_cadence(), 60);
+    e.ledger().with_mut(|l| l.timestamp += 61);
+    vc.update_nav(&101_000_000, &proof(&e), &signers(&e, &[&attestor]));
+    assert_eq!(vc.total_assets(), 101_000_000);
+}
+
+#[test]
+#[should_panic] // admin auth absent
+fn non_admin_cannot_change_nav_cadence() {
+    let e = Env::default();
+    let (vault, _t, _u, _a, _g, _o) = deploy_with_attestor(&e);
+    let attacker = Address::generate(&e);
+    e.set_auths(&[]);
+    e.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &vault,
+            fn_name: "set_nav_cadence",
+            args: (60u64,).into_val(&e),
+            sub_invokes: &[],
+        },
+    }]);
+    VaultContractClient::new(&e, &vault).set_nav_cadence(&60);
+}
