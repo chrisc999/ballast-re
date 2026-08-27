@@ -34,11 +34,16 @@ A real, on-chain run against the deployed testnet contracts (reproduce with
   downward moves allowed), `update_nav_extraordinary` for catastrophe writedowns, and
   `share_price` published for external price feeds. Liquidity: `fund_sleeve` /
   `deploy_capital` (NAV-neutral treasury moves), partial-fill claims that queue the
-  remainder rather than failing, and `set_redemptions_suspended`. Planned: per-period
-  redemption caps and allowlist enforcement.
+  remainder rather than failing, and `set_redemptions_suspended`. Compliance: an allowlist
+  gate on subscribe/redeem, managed by the compliance authority and switched on by
+  governance. Planned: per-period redemption caps.
 - **Escrow is always reversible** — `request_redemption` moves baUSD into the vault, so
   `cancel_redemption` is gated on nothing but the holder's own signature (not pause, not
   compliance). A request that cannot be claimed can always be undone.
+- **Compliance is address-only** — KYC/AML happens off-chain; on approval the compliance
+  authority writes the address to the on-chain allowlist. The contract never sees identity
+  data. Deciding who is on the list and switching the gate off are deliberately different
+  authorities.
 - **Roles** (separation of duties) — governance multisig (admin/upgrade), guardian
   (pause), an m-of-n attestation quorum (NAV), compliance authority (allowlist), treasury
   ops (sleeve). Designed as swappable addresses so mainnet multisig drops in later.

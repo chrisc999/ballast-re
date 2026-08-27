@@ -47,6 +47,12 @@ const MIN_INITIAL_DEPOSIT: i128 = 10_000_000;
 /// requires a contract upgrade, which is itself subject to the current timelock.
 const UPGRADE_TIMELOCK_SECS: u64 = 86_400;
 
+/// Allowlist entries get a long window (90 days) and are bumped on every access. An
+/// archived entry reads as "not allowed", so a KYC'd LP could otherwise be locked out of
+/// their own position by rent expiry rather than by any compliance decision.
+const ALLOWLIST_BUMP_AMOUNT: u32 = 90 * DAY_IN_LEDGERS;
+const ALLOWLIST_LIFETIME_THRESHOLD: u32 = ALLOWLIST_BUMP_AMOUNT - DAY_IN_LEDGERS;
+
 /// Soroban ledgers close on a ~5s cadence. Used to size redemption-request TTLs in
 /// ledgers from a notice period expressed in seconds.
 const SECS_PER_LEDGER: u64 = 5;
@@ -107,6 +113,16 @@ pub struct RedemptionClaimed {
     pub from: Address,
     pub shares: i128,
     pub assets: i128,
+}
+#[contractevent]
+pub struct AllowlistUpdated {
+    #[topic]
+    pub who: Address,
+    pub allowed: bool,
+}
+#[contractevent]
+pub struct AllowlistEnabledSet {
+    pub enabled: bool,
 }
 #[contractevent]
 pub struct SleeveFunded {
@@ -206,6 +222,7 @@ pub enum Error {
     InvalidThreshold = 23,
     NoSharesOutstanding = 24,
     RedemptionsSuspended = 25,
+    NotAllowed = 26,
 }
 
 /// Vault configuration and role addresses. Separation of duties: each authority can do
@@ -250,6 +267,8 @@ pub enum DataKey {
     TotalAssets,    // bookkept NAV
     NavLastUpdated, // freshness timestamp (used by update_nav)
     Paused,
+    AllowlistEnabled,     // master switch for compliance gating
+    Allowlist(Address),   // per-LP compliance flag (PERSISTENT: unbounded user data)
     RedemptionsSuspended, // deliberate economic gate, distinct from the guardian pause
     Attestors,            // Vec<Address> authorized to attest NAV
     AttestationThreshold, // m of n: how many of them must sign one update
@@ -735,6 +754,68 @@ impl VaultContract {
         .publish(e);
     }
 
+    // --- compliance allowlist ---------------------------------------------------------
+
+    /// Add or remove an address from the allowlist. Compliance-authority-gated.
+    ///
+    /// KYC/AML happens entirely off-chain. On approval the compliance authority writes the
+    /// address here; the contract never sees identity data, only allowlisted addresses.
+    pub fn set_allowed(e: &Env, who: Address, allowed: bool) {
+        read_config(e).compliance_authority.require_auth();
+        let key = DataKey::Allowlist(who.clone());
+        let p = e.storage().persistent();
+        if allowed {
+            p.set(&key, &true);
+            p.extend_ttl(&key, ALLOWLIST_LIFETIME_THRESHOLD, ALLOWLIST_BUMP_AMOUNT);
+        } else {
+            p.remove(&key);
+        }
+        AllowlistUpdated { who, allowed }.publish(e);
+    }
+
+    /// Allowlist several addresses in one call - onboarding usually arrives in batches.
+    pub fn set_allowed_many(e: &Env, addresses: Vec<Address>, allowed: bool) {
+        read_config(e).compliance_authority.require_auth();
+        let p = e.storage().persistent();
+        for who in addresses.iter() {
+            let key = DataKey::Allowlist(who.clone());
+            if allowed {
+                p.set(&key, &true);
+                p.extend_ttl(&key, ALLOWLIST_LIFETIME_THRESHOLD, ALLOWLIST_BUMP_AMOUNT);
+            } else {
+                p.remove(&key);
+            }
+            AllowlistUpdated { who, allowed }.publish(e);
+        }
+    }
+
+    /// Turn compliance gating on or off wholesale. Admin-gated, NOT compliance-gated:
+    /// disabling the entire gate is a governance decision, while deciding who is on the
+    /// list is the compliance authority's job. Separating them means the compliance
+    /// authority cannot switch off its own oversight.
+    pub fn set_allowlist_enabled(e: &Env, enabled: bool) {
+        read_config(e).admin.require_auth();
+        let s = e.storage().instance();
+        s.set(&DataKey::AllowlistEnabled, &enabled);
+        s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        AllowlistEnabledSet { enabled }.publish(e);
+    }
+
+    pub fn allowlist_enabled(e: &Env) -> bool {
+        e.storage()
+            .instance()
+            .get(&DataKey::AllowlistEnabled)
+            .unwrap_or(false)
+    }
+
+    /// Whether `who` may currently subscribe or claim. Always true while the gate is off.
+    pub fn is_allowed(e: &Env, who: Address) -> bool {
+        if !Self::allowlist_enabled(e) {
+            return true;
+        }
+        read_allowed(e, &who)
+    }
+
     // --- treasury: liquidity sleeve --------------------------------------------------
 
     /// Move USDC OUT of the vault to the treasury, to be deployed into reinsurance
@@ -995,9 +1076,39 @@ fn ensure_not_paused(e: &Env) {
     }
 }
 
-/// Allowlist compliance gate — currently a no-op (everyone allowed). Populating and
-/// enforcing the list here later keeps subscribe/redeem the same shape.
-fn ensure_allowed(_e: &Env, _who: &Address) {}
+/// Read an allowlist flag, bumping its TTL so an active LP's entry cannot be archived out
+/// from under them. Absent entry = not allowed.
+fn read_allowed(e: &Env, who: &Address) -> bool {
+    let key = DataKey::Allowlist(who.clone());
+    let p = e.storage().persistent();
+    if p.get::<DataKey, bool>(&key).unwrap_or(false) {
+        p.extend_ttl(&key, ALLOWLIST_LIFETIME_THRESHOLD, ALLOWLIST_BUMP_AMOUNT);
+        true
+    } else {
+        false
+    }
+}
+
+/// Compliance gate on the value-moving user flows: `subscribe`, `request_redemption` and
+/// `claim_redemption`.
+///
+/// Deliberately NOT applied to `cancel_redemption`: returning a holder's own escrowed
+/// shares moves no USDC and must never be blockable, so a de-allowlisted address is barred
+/// from exiting to cash but can always recover its shares. Transfers are not gated either
+/// - that lives in the token contract and remains an open question.
+fn ensure_allowed(e: &Env, who: &Address) {
+    if !e
+        .storage()
+        .instance()
+        .get(&DataKey::AllowlistEnabled)
+        .unwrap_or(false)
+    {
+        return; // gate off: everyone allowed
+    }
+    if !read_allowed(e, who) {
+        panic_with_error!(e, Error::NotAllowed);
+    }
+}
 
 fn ensure_redemptions_not_suspended(e: &Env) {
     if e.storage()

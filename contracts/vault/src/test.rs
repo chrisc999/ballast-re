@@ -1313,3 +1313,175 @@ fn non_admin_cannot_suspend_redemptions() {
     }]);
     VaultContractClient::new(&e, &vault).set_redemptions_suspended(&true);
 }
+
+// ---- compliance allowlist ----------------------------------------------------------
+// KYC/AML runs off-chain; the contract only ever sees allowlisted addresses.
+
+#[test]
+fn allowlist_is_off_by_default() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _ops) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+
+    assert!(!vc.allowlist_enabled());
+    assert!(vc.is_allowed(&user)); // everyone allowed while the gate is off
+
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    vc.subscribe(&user, &100_000_000);
+}
+
+#[test]
+#[should_panic] // NotAllowed
+fn enabled_allowlist_blocks_an_unlisted_subscriber() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _ops) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+
+    vc.set_allowlist_enabled(&true);
+    vc.subscribe(&user, &100_000_000);
+}
+
+#[test]
+fn allowlisted_address_can_subscribe_and_claim() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _ops) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+
+    vc.set_allowlist_enabled(&true);
+    vc.set_allowed(&user, &true);
+    assert!(vc.is_allowed(&user));
+
+    let shares = vc.subscribe(&user, &100_000_000);
+    vc.request_redemption(&user, &shares);
+    assert_eq!(vc.claim_redemption(&user), 100_000_000);
+}
+
+/// The policy from D-0014/D-0022, tested end to end: a de-allowlisted holder is barred
+/// from exiting to CASH, but can always recover their own escrowed SHARES. Compliance
+/// keeps its teeth; nobody gets trapped.
+#[test]
+fn delisted_holder_cannot_claim_but_can_always_cancel() {
+    let e = Env::default();
+    let (vault, token, usdc, _a, _g, _ops) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+
+    vc.set_allowlist_enabled(&true);
+    vc.set_allowed(&user, &true);
+    let shares = vc.subscribe(&user, &100_000_000);
+    vc.request_redemption(&user, &shares);
+
+    // Sanctions screening removes them mid-flight.
+    vc.set_allowed(&user, &false);
+    assert!(!vc.is_allowed(&user));
+
+    // Cash exit is closed...
+    assert!(vc.try_claim_redemption(&user).is_err());
+    // ...but their own shares come back.
+    vc.cancel_redemption(&user);
+    assert_eq!(TokenContractClient::new(&e, &token).balance(&user), shares);
+    assert_eq!(TokenClient::new(&e, &usdc).balance(&user), 0);
+}
+
+#[test]
+#[should_panic] // NotAllowed
+fn delisting_blocks_further_subscription() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _ops) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 200_000_000);
+
+    vc.set_allowlist_enabled(&true);
+    vc.set_allowed(&user, &true);
+    vc.subscribe(&user, &100_000_000);
+
+    vc.set_allowed(&user, &false);
+    vc.subscribe(&user, &100_000_000);
+}
+
+#[test]
+fn batch_allowlisting_admits_every_address() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _ops) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let (u1, u2, u3) = (
+        Address::generate(&e),
+        Address::generate(&e),
+        Address::generate(&e),
+    );
+
+    vc.set_allowlist_enabled(&true);
+    vc.set_allowed_many(&signers(&e, &[&u1, &u2, &u3]), &true);
+
+    for u in [&u1, &u2, &u3] {
+        assert!(vc.is_allowed(u));
+        fund_usdc(&e, &usdc, u, 100_000_000);
+        vc.subscribe(u, &100_000_000);
+    }
+    assert_eq!(vc.total_assets(), 300_000_000);
+}
+
+#[test]
+#[should_panic] // compliance authority auth absent
+fn non_compliance_authority_cannot_allowlist() {
+    let e = Env::default();
+    let (vault, _t, _u, _a, _g, _ops) = deploy_with_attestor(&e);
+    let attacker = Address::generate(&e);
+    let target = Address::generate(&e);
+    e.set_auths(&[]);
+    e.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &vault,
+            fn_name: "set_allowed",
+            args: (target.clone(), true).into_val(&e),
+            sub_invokes: &[],
+        },
+    }]);
+    VaultContractClient::new(&e, &vault).set_allowed(&target, &true);
+}
+
+/// Separation of duties: the compliance authority decides WHO is on the list, but must not
+/// be able to switch off its own oversight. Only governance can disable the gate.
+#[test]
+#[should_panic] // admin auth absent
+fn compliance_authority_cannot_disable_the_gate() {
+    let e = Env::default();
+    let (vault, _t, _u, _a, _g, compliance) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    vc.set_allowlist_enabled(&true);
+
+    e.set_auths(&[]);
+    e.mock_auths(&[MockAuth {
+        address: &compliance,
+        invoke: &MockAuthInvoke {
+            contract: &vault,
+            fn_name: "set_allowlist_enabled",
+            args: (false,).into_val(&e),
+            sub_invokes: &[],
+        },
+    }]);
+    vc.set_allowlist_enabled(&false);
+}
+
+#[test]
+fn governance_can_disable_the_gate_again() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _ops) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+
+    vc.set_allowlist_enabled(&true);
+    assert!(!vc.is_allowed(&user));
+    vc.set_allowlist_enabled(&false);
+    assert!(vc.is_allowed(&user));
+    vc.subscribe(&user, &100_000_000);
+}
