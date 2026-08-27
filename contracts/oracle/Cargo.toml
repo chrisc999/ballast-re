@@ -1,0 +1,21 @@
+[package]
+name = "ba-usd-oracle"
+description = "SEP-40 price feed publishing baUSD's attested share price."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+# The feed reads the vault through a minimal #[contractclient] interface (see lib.rs),
+# not by importing the vault crate — same reasoning as the vault/token split.
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+# Real vault + token, used to test the feed against genuine attested NAV.
+ba-usd-vault = { path = "../vault" }
+ba-usd-token = { path = "../token" }

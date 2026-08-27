@@ -44,6 +44,11 @@ A real, on-chain run against the deployed testnet contracts (reproduce with
   authority writes the address to the on-chain allowlist. The contract never sees identity
   data. Deciding who is on the list and switching the gate off are deliberately different
   authorities.
+- **Price feed** — a SEP-40 oracle contract publishing the vault's attested share price.
+  baUSD does not trade, so its price cannot be *discovered* by sampling a market; it is
+  *published* from attested NAV. SEP-40 is a pure interface standard, so anything that can
+  already read a SEP-40 feed reads baUSD unchanged. The vault stays the single source of
+  truth — the feed only ever copies `share_price()`, and `record()` is permissionless.
 - **Roles** (separation of duties) — governance multisig (admin/upgrade), guardian
   (pause), an m-of-n attestation quorum (NAV), compliance authority (allowlist), treasury
   ops (sleeve). Designed as swappable addresses so mainnet multisig drops in later.
