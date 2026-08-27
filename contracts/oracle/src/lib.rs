@@ -16,6 +16,26 @@
 //! them. `record()` is deliberately permissionless — it can only ever copy the vault's own
 //! numbers, so letting anyone keep the history current costs nothing and removes an
 //! operational dependency on us.
+//!
+//! # Integrating this feed for collateral valuation
+//!
+//! **Check staleness before using this price to move money.** Every `PriceData` carries the
+//! timestamp of the attestation it came from, and `is_stale()` reports the vault's own
+//! verdict. A price used to value collateral or trigger a liquidation must be rejected when
+//! stale — attested NAV updates roughly daily and can lapse, and lending against a price
+//! nobody currently stands behind is how bad debt is created.
+//!
+//! Per SEP-40 convention this contract does NOT hide a stale price: `lastprice` keeps
+//! returning the last attested point with its true timestamp, so integrators can apply
+//! their own policy rather than having one imposed. That choice puts the obligation on the
+//! consumer, which is why it is stated here as loudly as possible.
+//!
+//! **baUSD is illiquid and allowlist-gated, which matters more than the price does.** A
+//! liquidator who seizes baUSD cannot promptly turn it into cash: redemption requires being
+//! on the compliance allowlist, serving the notice period, and the vault having sleeve
+//! liquidity — and redemptions can be deliberately suspended. Any lending market accepting
+//! baUSD as collateral must account for that in its liquidation design; an accurate price
+//! does not by itself make collateral seizable.
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
@@ -27,6 +47,7 @@ use soroban_sdk::{
 pub trait VaultPrice {
     fn share_price(env: Env) -> i128;
     fn nav_last_updated(env: Env) -> u64;
+    fn is_nav_stale(env: Env) -> bool;
 }
 
 // --- TTL / rent ---------------------------------------------------------------------
@@ -146,6 +167,15 @@ impl PriceFeedContract {
 
         PriceRecorded { price, timestamp }.publish(e);
         point
+    }
+
+    /// Whether the vault currently considers its NAV stale.
+    ///
+    /// Integrators valuing collateral MUST consult this (or the timestamp on the returned
+    /// `PriceData`) before acting on a price. See the module docs.
+    pub fn is_stale(e: &Env) -> bool {
+        let vault: Address = read_instance(e, &DataKey::Vault);
+        VaultClient::new(e, &vault).is_nav_stale()
     }
 
     pub fn vault(e: &Env) -> Address {

@@ -268,3 +268,26 @@ fn record_is_permissionless() {
     let point = h.feed.record();
     assert!(point.price > 10_000_000);
 }
+
+// ---- staleness, for collateral consumers -------------------------------------------
+
+/// A price used to value collateral must be rejectable when nobody currently stands
+/// behind it. The feed reports the vault's own verdict rather than hiding the price.
+#[test]
+fn reports_staleness_without_hiding_the_price() {
+    let h = setup();
+    h.seed(100_000_000);
+    h.attest(100_000_000);
+    let point = h.feed.record();
+    assert!(!h.feed.is_stale());
+
+    // Let the attestation lapse past the vault's 48h window.
+    h.e.ledger().with_mut(|l| l.timestamp += 49 * 60 * 60);
+
+    assert!(h.feed.is_stale());
+    // SEP-40 convention: the last attested point is still returned, with its true
+    // timestamp, so the consumer applies its own policy.
+    let last = h.feed.lastprice(&h.asset()).unwrap();
+    assert_eq!(last.price, point.price);
+    assert_eq!(last.timestamp, point.timestamp);
+}
