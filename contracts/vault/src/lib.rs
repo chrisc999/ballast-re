@@ -1055,6 +1055,32 @@ impl VaultContract {
         NavCadenceUpdated { interval_secs }.publish(e);
     }
 
+    /// `total_assets` as of the last attestation. The delta cap is measured against this,
+    /// NOT against current `total_assets` - see `ensure_nav_delta_within_bound`.
+    pub fn nav_baseline(e: &Env) -> i128 {
+        read_i128(e, &DataKey::NavBaseline)
+    }
+
+    /// The largest absolute NAV move a routine attestation may currently make.
+    ///
+    /// Operators need this: after large subscriptions the attestable move is bounded by the
+    /// OLDER baseline, so the permitted delta can be far smaller than a naive percentage of
+    /// today's `total_assets` would suggest. Attesting without checking this is how a
+    /// legitimate update gets rejected.
+    pub fn max_nav_delta(e: &Env) -> i128 {
+        let baseline = read_i128(e, &DataKey::NavBaseline);
+        let current = read_i128(e, &DataKey::TotalAssets);
+        let bound_base = if current < baseline {
+            current
+        } else {
+            baseline
+        };
+        bound_base
+            .checked_mul(MAX_NAV_DELTA_BPS)
+            .and_then(|v| v.checked_div(BPS_DENOM))
+            .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow))
+    }
+
     pub fn nav_cadence(e: &Env) -> u64 {
         read_nav_interval(e)
     }

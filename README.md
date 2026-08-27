@@ -120,7 +120,8 @@ wires them together:
 
 ```bash
 ./scripts/deploy_testnet.sh     # writes deploy/testnet.json
-./scripts/demo_testnet.sh       # runs deposit -> mint -> redeem on-chain
+./scripts/demo_testnet.sh       # deposit -> mint -> redeem on-chain
+./scripts/demo_nav_testnet.sh   # attested NAV, published price, compliance, sleeve
 ```
 
 Always a **fresh** deploy rather than an in-place wasm upgrade: the vault's `Config` shape
@@ -131,10 +132,10 @@ Live testnet contract IDs (see [`deploy/testnet.json`](deploy/testnet.json)):
 
 | Contract | ID |
 |---|---|
-| Vault | `CDXX6SSW7L2AAIIMDHGOLD56SO5P4N7W4CM5YGVUZEDTTTWL7XOSPVFF` |
-| baUSD token | `CA3EPCTHEGWL4WN45S6RGGOTUHFLIC2MZISXICPCFZB5Q3SO572ZGZ5M` |
-| SEP-40 price feed | `CBG5KBSM7FNFS6S4PFSG6EA77JF5SM62PXVIKRM7AKOEDOMMWAC3WHJR` |
-| DeFindex strategy | `CDB5NU4C7YATSZ4I6HCFI55PYO3J3KNXWAQT3O5NR4MDWFB7TGLXV4EE` |
+| Vault | `CCJU2DWREBEDQYGB5D7BHX47OQMLL4TIOMCKLFHVXBWVPLN2ER3OSVWA` |
+| baUSD token | `CDAYBBNHMKHMXQGN4FIUYXGOKNEHYE7E43HDOXUP2RDYZ2KECS7RO3XB` |
+| SEP-40 price feed | `CB3OTZHFL2GNXGXQYLRSF2HLVFIYWF3ID4APS3DIEPP3Q5CHMESHNC6X` |
+| DeFindex strategy | `CDSBIXHWZIYK5SNM43QEKNCQVTSKJGLMLOWILOK5F25BUVNHBACXLBVE` |
 | Mock USDC (SAC) | `CAJBB6LISKXJN5ON2CCFTGPGEUMK7RNH3SGWIXXHD6Z4NFWZTWKINW2U` |
 
 **NAV cadence on testnet** is set to 60s rather than the 20h default, so the

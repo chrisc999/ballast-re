@@ -1782,3 +1782,33 @@ fn non_admin_cannot_change_nav_cadence() {
     }]);
     VaultContractClient::new(&e, &vault).set_nav_cadence(&60);
 }
+
+/// Operators need to see the attestable budget: after large subscriptions it is bounded by
+/// the OLDER baseline, so it can be far smaller than a naive percentage of today's
+/// total_assets. Attesting without checking this is how a legitimate update gets rejected.
+#[test]
+fn max_nav_delta_reflects_the_baseline_not_current_assets() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, attestor) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+
+    let lp = Address::generate(&e);
+    fund_usdc(&e, &usdc, &lp, 100_000_000);
+    vc.subscribe(&lp, &100_000_000);
+    assert_eq!(vc.nav_baseline(), 100_000_000);
+    assert_eq!(vc.max_nav_delta(), 2_000_000); // 2% of 100m
+
+    // A large deposit raises total_assets but NOT the attestable budget.
+    let whale = Address::generate(&e);
+    fund_usdc(&e, &usdc, &whale, 900_000_000);
+    vc.subscribe(&whale, &900_000_000);
+    assert_eq!(vc.total_assets(), 1_000_000_000);
+    assert_eq!(vc.nav_baseline(), 100_000_000);
+    assert_eq!(vc.max_nav_delta(), 2_000_000); // unchanged
+
+    // Attesting within the reported budget succeeds, and resets both.
+    advance_past_cadence(&e);
+    vc.update_nav(&1_001_500_000, &proof(&e), &signers(&e, &[&attestor]));
+    assert_eq!(vc.nav_baseline(), 1_001_500_000);
+    assert_eq!(vc.max_nav_delta(), 20_030_000);
+}
