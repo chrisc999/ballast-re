@@ -135,6 +135,7 @@ wires them together:
 ./scripts/deploy_testnet.sh     # writes deploy/testnet.json
 ./scripts/demo_testnet.sh       # deposit -> mint -> redeem on-chain
 ./scripts/demo_nav_testnet.sh   # attested NAV, published price, compliance, sleeve
+./scripts/defindex_testnet.sh   # live DeFindex vault allocating to baUSD
 ```
 
 Always a **fresh** deploy rather than an in-place wasm upgrade: the vault's `Config` shape
@@ -145,10 +146,11 @@ Live testnet contract IDs (see [`deploy/testnet.json`](deploy/testnet.json)):
 
 | Contract | ID |
 |---|---|
-| Vault | `CCJU2DWREBEDQYGB5D7BHX47OQMLL4TIOMCKLFHVXBWVPLN2ER3OSVWA` |
-| baUSD token | `CDAYBBNHMKHMXQGN4FIUYXGOKNEHYE7E43HDOXUP2RDYZ2KECS7RO3XB` |
-| SEP-40 price feed | `CB3OTZHFL2GNXGXQYLRSF2HLVFIYWF3ID4APS3DIEPP3Q5CHMESHNC6X` |
-| DeFindex strategy | `CDSBIXHWZIYK5SNM43QEKNCQVTSKJGLMLOWILOK5F25BUVNHBACXLBVE` |
+| Vault | `CAYRNUTZF5Y5AURQEUIIOTWMZOYDNSR3XS3N6FLJZOXHNUTSKDAYBTEY` |
+| baUSD token | `CAKIZ24RUL4EAJNEBX64HIZHW3O27KVAEYM47MHYXMAQECLX4TTHRQYM` |
+| SEP-40 price feed | `CBDKXYQO46VJUVGSFI2BHA5MZO5C5E6D6GZLZ3Z26SROFDG4RJSLATYX` |
+| DeFindex strategy | `CDYS2RH7KTWRSL7FN3WXXBYDL7P2N2ZEPMZY65SWTJ75ZU34RAPL7Y4E` |
+| DeFindex vault (holds the strategy) | `CCYOQRFSM3EJLBSFWWEBTF5UGLFHVTZ7FUNVPDACG7PPQU6Z2XC3ECMU` |
 | Mock USDC (SAC) | `CAJBB6LISKXJN5ON2CCFTGPGEUMK7RNH3SGWIXXHD6Z4NFWZTWKINW2U` |
 
 **NAV cadence on testnet** is set to 60s rather than the 20h default, so the
