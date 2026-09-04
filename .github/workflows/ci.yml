@@ -51,8 +51,44 @@ jobs:
       - name: Wasm build
         run: stellar contract build
 
+  # ---- Web console: typecheck, lint, production build ----------------------
+  # Built once here, then published under /app/ on the same Pages site as the
+  # coverage report. Gates PRs too: a console that no longer builds is a failure.
+  web-console:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build (served at /ballast-re/app/)
+        run: npm run build
+        env:
+          BASE_PATH: /ballast-re/app/
+
+      - name: Upload console build
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-console
+          path: app/dist
+
   # ---- Coverage report (published publicly by deploy-pages) ----------------
   coverage:
+    needs: web-console
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -84,19 +120,28 @@ jobs:
           name: coverage-html
           path: coverage-html
 
-      # Package the HTML for GitHub Pages (consumed by deploy-pages).
+      # Package the site for GitHub Pages (consumed by deploy-pages).
       # cargo llvm-cov nests the report under html/, so publish that subdir as the
-      # Pages root — the report then serves at the site root, not /html/.
+      # Pages root — the report then serves at the site root, not /html/ — and
+      # place the web console beside it at /app/.
+      - name: Add web console to the site
+        if: github.ref == 'refs/heads/main'
+        uses: actions/download-artifact@v7
+        with:
+          name: web-console
+          path: coverage-html/html/app
+
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v5
         with:
           path: coverage-html/html
 
-  # ---- Publish the coverage report to GitHub Pages (main only) -------------
-  # Publishes the coverage report publicly when the repo/Pages is public.
+  # ---- Publish the coverage report + web console to GitHub Pages (main only) --
+  # Publishes publicly when the repo/Pages is public.
   deploy-pages:
-    needs: coverage
+    # Publishing requires the whole suite, not just the coverage job.
+    needs: [build-test, coverage]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

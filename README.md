@@ -142,11 +142,16 @@ connect a wallet, add the USDC trustline, deposit, request/claim/cancel redempti
 and watch share price, NAV, and the sleeve live. Contract addresses are imported
 straight from `deploy/testnet.json`, so the app can never drift from what is deployed.
 
+**Hosted:** https://chrisc999.github.io/ballast-re/app/ (rebuilt by CI on every push
+to `main`, next to the coverage report). Freighter must be set to Testnet.
+
+To run it locally:
+
 ```bash
 cd app && npm install && npm run dev
 ```
 
-Requires Node 18+. Freighter must be set to Testnet.
+Requires Node 18+.
 
 ## Testnet deployment
 
