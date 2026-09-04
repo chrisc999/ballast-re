@@ -439,10 +439,11 @@ impl VaultContract {
         // The FIRST deposit establishes the NAV baseline the delta cap is measured against.
         // Later deposits deliberately do NOT raise it - see `ensure_nav_delta_within_bound`.
         // It also restarts the freshness clock: the deposit itself is the bootstrap
-        // attestation (price is 1:1 by construction), and the authority cannot re-attest
-        // until shares exist.
+        // attestation (shares are minted 1:1 by construction), and the authority cannot
+        // re-attest until shares exist. The baseline is the full NAV the new shares own,
+        // including any residual the previous holders' rounding left behind.
         if ts == 0 {
-            s.set(&DataKey::NavBaseline, &amount);
+            s.set(&DataKey::NavBaseline, &new_ta);
             s.set(&DataKey::NavLastUpdated, &e.ledger().timestamp());
         }
         s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -1544,8 +1545,20 @@ fn read_i128(e: &Env, key: &DataKey) -> i128 {
 // --- pure share math (multiply-before-divide, floor, virtual offset) ---------------
 // Kept as free functions of plain integers so they can be exhaustively unit-tested
 // without an Env. Round DOWN everywhere so rounding always favors the vault.
+//
+// A vault with NO shares outstanding is priced at exactly 1:1, regardless of what
+// `total_assets` reads. Two states reach it: a fresh deployment (assets 0) and the
+// everyone-redeemed state, where floor rounding on the final claims leaves a few stroops
+// of attested NAV that no share owns. Feeding that residual through the virtual-offset
+// formula would price the next deposit at (residual + 1) assets per share - one leftover
+// stroop doubles the share price, and the SEP-40 feed would publish that jump although
+// nothing economic happened. Instead the next deposit re-bootstraps the vault at 1.0 and
+// the residual is simply folded into the NAV it owns (see `subscribe`).
 
 fn shares_for_deposit(assets_in: i128, total_shares: i128, total_assets: i128) -> Option<i128> {
+    if total_shares == 0 {
+        return Some(assets_in);
+    }
     let num = assets_in.checked_mul(total_shares.checked_add(VIRTUAL_SHARES)?)?;
     let den = total_assets.checked_add(VIRTUAL_ASSETS)?;
     num.checked_div(den)
@@ -1558,6 +1571,9 @@ fn shares_for_deposit_ceil(
     total_shares: i128,
     total_assets: i128,
 ) -> Option<i128> {
+    if total_shares == 0 {
+        return Some(assets_in);
+    }
     let num = assets_in.checked_mul(total_shares.checked_add(VIRTUAL_SHARES)?)?;
     let den = total_assets.checked_add(VIRTUAL_ASSETS)?;
     // ceil(num/den) for non-negative num, den > 0.
@@ -1565,6 +1581,9 @@ fn shares_for_deposit_ceil(
 }
 
 fn assets_for_shares(shares_in: i128, total_shares: i128, total_assets: i128) -> Option<i128> {
+    if total_shares == 0 {
+        return Some(shares_in);
+    }
     let num = shares_in.checked_mul(total_assets.checked_add(VIRTUAL_ASSETS)?)?;
     let den = total_shares.checked_add(VIRTUAL_SHARES)?;
     num.checked_div(den)

@@ -21,6 +21,23 @@ yield. LPs deposit USDC on Stellar and mint baUSD; the share price is
 A real, on-chain run against the deployed testnet contracts (reproduce with
 `./scripts/demo_testnet.sh`).
 
+## Demo — attested NAV, published price, compliance
+
+![baUSD testnet demo: allowlist gating, a bounded NAV attestation, the SEP-40 feed republished, a partial-fill redemption completed after the treasury refills the sleeve](media/demo-nav.gif)
+
+An unlisted LP is refused, gets allowlisted, deposits 100 USDC; the attestor quorum
+moves NAV up 1% (a 6% move and a stranger's signature are both rejected first); the
+price feed republishes; the LP's redemption pays what the sleeve holds and completes
+once the treasury returns capital (`./scripts/demo_nav_testnet.sh`).
+
+## Demo — baUSD as a DeFindex strategy
+
+![baUSD testnet demo: a DeFindex vault created from the public factory allocates 100 USDC into baUSD through the strategy adapter, then withdraws 40 atomically](media/demo-defindex.gif)
+
+A DeFindex vault created from PaltaLabs' public testnet factory, with baUSD as its
+strategy: deposit, invest, and an atomic withdrawal through request + claim
+(`./scripts/defindex_testnet.sh`).
+
 ## Architecture (short version)
 
 - **baUSD token** — a SEP-41-compatible Soroban token (OpenZeppelin `stellar-tokens`
@@ -105,8 +122,13 @@ cargo clippy --all-targets -- -D warnings
 ```
 contracts/
   token/     baUSD SEP-41 token (OZ stellar-tokens base)
-  vault/     appreciating-share vault
+  vault/     appreciating-share vault: NAV, redemptions, compliance, sleeve
+  oracle/    SEP-40 price feed publishing the vault's attested share price
+  strategy/  DeFindex strategy adapter over the vault
+app/         React + Freighter web console for the testnet deployment
 scripts/     deploy + demo scripts (testnet)
+deploy/      live testnet addresses (testnet.json) and demo transcripts
+media/       recorded demo runs
 .github/     CI workflows
 ```
 
@@ -146,11 +168,11 @@ Live testnet contract IDs (see [`deploy/testnet.json`](deploy/testnet.json)):
 
 | Contract | ID |
 |---|---|
-| Vault | `CAYRNUTZF5Y5AURQEUIIOTWMZOYDNSR3XS3N6FLJZOXHNUTSKDAYBTEY` |
-| baUSD token | `CAKIZ24RUL4EAJNEBX64HIZHW3O27KVAEYM47MHYXMAQECLX4TTHRQYM` |
-| SEP-40 price feed | `CBDKXYQO46VJUVGSFI2BHA5MZO5C5E6D6GZLZ3Z26SROFDG4RJSLATYX` |
-| DeFindex strategy | `CDYS2RH7KTWRSL7FN3WXXBYDL7P2N2ZEPMZY65SWTJ75ZU34RAPL7Y4E` |
-| DeFindex vault (holds the strategy) | `CCYOQRFSM3EJLBSFWWEBTF5UGLFHVTZ7FUNVPDACG7PPQU6Z2XC3ECMU` |
+| Vault | `CA6CPFXGVO7BAOW7DWGBIXEKN4EHJRNKYNN464EKRUCVTYG6QCWOUIU4` |
+| baUSD token | `CDIMBZ6CCHJ3YDDZCFM7NPHJ4BD6RXKL6KEGJLGKYIJKGPZD2JQ4LQRX` |
+| SEP-40 price feed | `CC7HH575C7HERR3C25QSMH3XBNAQLFHCLMLF2APIXGHQN2HKD5BQS5IK` |
+| DeFindex strategy | `CCOZIVFCJPRMZ74ZA774PCHICOTFV7XTZW3ZO4WRAGBTWR6YU2SXPK4U` |
+| DeFindex vault (holds the strategy) | `CCM3LEAB5IBTQ3OYACDFBI7YAC2SCUM55HVA2M667N7EYEOK77LVOL4C` |
 | Mock USDC (SAC) | `CAJBB6LISKXJN5ON2CCFTGPGEUMK7RNH3SGWIXXHD6Z4NFWZTWKINW2U` |
 
 **NAV cadence on testnet** is set to 60s rather than the 20h default, so the

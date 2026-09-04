@@ -1,7 +1,7 @@
 #![cfg(test)]
 use crate::{
     assets_for_shares, shares_for_deposit, shares_for_deposit_ceil, Asset, PriceData,
-    VaultContract, VaultContractClient, MIN_INITIAL_DEPOSIT,
+    VaultContract, VaultContractClient, MIN_INITIAL_DEPOSIT, PRICE_SCALE,
 };
 use ba_usd_token::{TokenContract, TokenContractClient};
 use soroban_sdk::{
@@ -72,47 +72,44 @@ fn inflation_attack_is_neutralized() {
 // BEFORE the code that makes it reachable lands.
 
 #[test]
-fn deposit_into_redeemed_empty_vault_with_residual() {
-    // All shares gone, a little attested NAV left behind by rounding.
+fn deposit_into_redeemed_empty_vault_with_residual_is_one_to_one() {
+    // All shares gone, a little attested NAV left behind by rounding. The next deposit
+    // re-bootstraps the vault: minted 1:1, and the residual becomes part of the NAV the
+    // new shares own rather than a multiplier on the share price.
     let residual = 37i128;
     let deposit = MIN_INITIAL_DEPOSIT;
 
-    let shares = shares_for_deposit(deposit, 0, residual).unwrap();
+    assert_eq!(shares_for_deposit(deposit, 0, residual), Some(deposit));
+    assert_eq!(shares_for_deposit_ceil(deposit, 0, residual), Some(deposit));
 
-    // Share granularity coarsens: each share is now worth ~(residual + 1) assets, so a
-    // 1.0-baUSD deposit mints far fewer than 1.0 baUSD of shares.
-    assert_eq!(shares, 263_157);
-
-    let back = assets_for_shares(shares, shares, residual + deposit).unwrap();
-
-    // Rounding still favors the vault - the depositor gets back one stroop less than they
-    // put in, never more, even though they are the sole owner of the residual.
-    assert_eq!(back, deposit - 1);
-    assert!(back <= deposit + residual, "rounding favored the depositor");
-    // Loss is bounded by the share granularity, not unbounded.
+    // Redeeming everything returns the deposit plus (almost all of) the residual, never
+    // more than the vault holds.
+    let back = assets_for_shares(deposit, deposit, residual + deposit).unwrap();
     assert!(
-        back >= deposit - (residual + 1),
-        "loss exceeded one share of value"
+        back >= deposit,
+        "bootstrap depositor lost money: {back} < {deposit}"
     );
+    assert!(back <= deposit + residual, "rounding favored the depositor");
 }
 
-/// The brick case: if residual ever exceeds the deposit, shares floor to zero. `subscribe`
-/// rejects that with ZeroShares rather than silently taking the funds - but it means new
-/// deposits below the residual are refused, so the residual must stay dust-sized.
+/// A shareless vault is priced at 1.0 whatever `total_assets` reads: the previous formula
+/// turned one leftover stroop into a 2x share price, which the price feed would publish.
 #[test]
-fn residual_larger_than_deposit_rounds_shares_to_zero() {
-    let residual = 1_000i128;
-    assert_eq!(shares_for_deposit(999, 0, residual), Some(0));
-    // One unit past the residual is the smallest deposit that still mints.
-    assert_eq!(shares_for_deposit(1_001, 0, residual), Some(1));
+fn shareless_vault_price_ignores_residual() {
+    for residual in [0i128, 1, 37, 1_000] {
+        assert_eq!(
+            assets_for_shares(PRICE_SCALE, 0, residual),
+            Some(PRICE_SCALE)
+        );
+        assert_eq!(shares_for_deposit(1_000, 0, residual), Some(1_000));
+    }
 }
 
 #[test]
 fn empty_vault_with_no_residual_is_one_to_one() {
     // A genuinely fresh vault: no shares, no assets, so the first deposit sets price 1.0.
     assert_eq!(shares_for_deposit(1_000, 0, 0), Some(1_000));
-    // Note `assets_for_shares(n, 0, 0)` returns n, but that input is unreachable through
-    // the contract: no shares can exist to redeem while total_shares is 0.
+    assert_eq!(assets_for_shares(1_000, 0, 0), Some(1_000));
 }
 
 #[test]
@@ -1110,6 +1107,51 @@ fn empty_vault_accepts_deposits_at_stale_nav_and_restarts_the_clock() {
     vc.subscribe(&user, &100_000_000);
     assert_eq!(vc.nav_last_updated(), now);
     assert!(!vc.is_nav_stale());
+}
+
+/// Replays the sequence observed on testnet: deposit, attest NAV up, everyone redeems (the
+/// floor on the final claim leaves a residual), then a new depositor arrives. Before the
+/// fix the residual priced that deposit at 2.0 per share and the feed published the jump.
+#[test]
+fn redeemed_vault_with_residual_rebootstraps_at_one() {
+    let e = Env::default();
+    let (vault, token, usdc, _a, _g, attestor) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let alice = Address::generate(&e);
+    let bob = Address::generate(&e);
+    fund_usdc(&e, &usdc, &alice, 1_000_000_000);
+    fund_usdc(&e, &usdc, &bob, 1_000_000_000);
+
+    let shares = vc.subscribe(&alice, &1_000_000_000);
+    advance_past_cadence(&e);
+    vc.update_nav(&1_010_000_000, &proof(&e), &signers(&e, &[&attestor]));
+    // The treasury tops the sleeve up so the appreciated claim can settle in full.
+    fund_usdc(&e, &usdc, &vault, 10_000_000);
+    vc.request_redemption(&alice, &shares);
+    vc.claim_redemption(&alice);
+    assert_eq!(vc.total_shares(), 0);
+    let residual = vc.total_assets();
+    assert!(
+        residual > 0,
+        "this scenario relies on rounding leaving a residual"
+    );
+
+    // Empty vault: priced at 1.0, and quoting a deposit is 1:1.
+    assert_eq!(vc.share_price(), PRICE_SCALE);
+    assert_eq!(vc.convert_to_shares(&500_000_000), 500_000_000);
+
+    let minted = vc.subscribe(&bob, &500_000_000);
+    assert_eq!(minted, 500_000_000);
+    assert_eq!(TokenClient::new(&e, &token).balance(&bob), 500_000_000);
+    assert_eq!(vc.total_assets(), 500_000_000 + residual);
+    assert_eq!(vc.nav_baseline(), 500_000_000 + residual);
+    // Price is 1.0 up to the dust bob now owns - not 2.0.
+    let price = vc.share_price();
+    assert!(
+        (PRICE_SCALE..PRICE_SCALE + 10).contains(&price),
+        "price {price}"
+    );
+    assert!(vc.convert_to_assets(&minted) >= 500_000_000);
 }
 
 #[test]
