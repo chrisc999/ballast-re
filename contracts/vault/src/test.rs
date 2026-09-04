@@ -1084,6 +1084,34 @@ fn stale_nav_does_not_block_exits() {
     assert_eq!(TokenClient::new(&e, &usdc).balance(&user), 200_000_000);
 }
 
+/// The everyone-redeemed state must never wedge the vault. With zero shares outstanding
+/// `update_nav` refuses to attest (NoSharesOutstanding), so if staleness also refused
+/// deposits, an empty vault whose last attestation aged out could never be refilled.
+/// An empty vault has nobody to dilute; the first deposit is its own bootstrap
+/// attestation and restarts the freshness clock.
+#[test]
+fn empty_vault_accepts_deposits_at_stale_nav_and_restarts_the_clock() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, _s) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 300_000_000);
+    let shares = vc.subscribe(&user, &100_000_000);
+
+    // Everyone redeems, then the attestation ages past the freshness window.
+    vc.request_redemption(&user, &shares);
+    vc.claim_redemption(&user);
+    assert_eq!(vc.total_shares(), 0);
+    e.ledger().with_mut(|l| l.timestamp += 49 * 60 * 60);
+    assert!(vc.is_nav_stale());
+
+    // A new first deposit still lands, and the vault is fully operational again.
+    let now = e.ledger().timestamp();
+    vc.subscribe(&user, &100_000_000);
+    assert_eq!(vc.nav_last_updated(), now);
+    assert!(!vc.is_nav_stale());
+}
+
 #[test]
 fn nav_last_updated_tracks_attestations() {
     let e = Env::default();

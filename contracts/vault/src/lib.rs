@@ -396,8 +396,13 @@ impl VaultContract {
         ensure_not_paused(e);
         ensure_allowed(e, &from);
         // Never sell shares at a price we cannot currently vouch for. Exits deliberately
-        // carry no such gate.
-        ensure_nav_fresh(e);
+        // carry no such gate. An EMPTY vault is exempt: with no shares outstanding there
+        // is no price to vouch for and nobody to dilute — and `update_nav` refuses to
+        // attest a shareless vault, so gating here would wedge deposits permanently once
+        // everyone has redeemed and the last attestation has aged out.
+        if read_i128(e, &DataKey::TotalShares) > 0 {
+            ensure_nav_fresh(e);
+        }
         ensure_settlement_asset_pegged(e);
         if amount <= 0 {
             panic_with_error!(e, Error::InvalidAmount);
@@ -433,8 +438,12 @@ impl VaultContract {
         s.set(&DataKey::TotalShares, &new_ts);
         // The FIRST deposit establishes the NAV baseline the delta cap is measured against.
         // Later deposits deliberately do NOT raise it - see `ensure_nav_delta_within_bound`.
+        // It also restarts the freshness clock: the deposit itself is the bootstrap
+        // attestation (price is 1:1 by construction), and the authority cannot re-attest
+        // until shares exist.
         if ts == 0 {
             s.set(&DataKey::NavBaseline, &amount);
+            s.set(&DataKey::NavLastUpdated, &e.ledger().timestamp());
         }
         s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
