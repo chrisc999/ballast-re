@@ -1,7 +1,7 @@
 # Ballast Re — baUSD
 
 [![CI](https://github.com/chrisc999/ballast-re/actions/workflows/ci.yml/badge.svg)](https://github.com/chrisc999/ballast-re/actions/workflows/ci.yml)
-[![coverage](https://img.shields.io/badge/coverage-report-4c1)](https://chrisc999.github.io/ballast-re/coverage/)
+[![coverage](https://img.shields.io/badge/coverage-report-4c1)](https://app.ballastre.xyz/coverage/)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 **baUSD** is a Soroban-native, appreciating-share vault token backed by reinsurance
@@ -147,7 +147,7 @@ connect a wallet, add the USDC trustline, deposit, request/claim/cancel redempti
 and watch share price, NAV, and the sleeve live. Contract addresses are imported
 straight from `deploy/testnet.json`, so the app can never drift from what is deployed.
 
-**Hosted:** https://chrisc999.github.io/ballast-re/ (rebuilt by CI on every push
+**Hosted:** https://app.ballastre.xyz/ (rebuilt by CI on every push
 to `main`; the coverage report is at `/coverage/`). Freighter must be set to Testnet.
 
 To run it locally:
