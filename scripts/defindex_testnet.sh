@@ -9,7 +9,7 @@
 #   ./scripts/defindex_testnet.sh
 #
 # The factory and router addresses are the published testnet deployments:
-#   factory — paltalabs/defindex  public/testnet.contracts.json
+#   factory — defindex-io/stellar-contracts  public/testnet.contracts.json
 #   router  — soroswap/core       public/testnet.contracts.json
 set -euo pipefail
 

@@ -34,7 +34,7 @@ once the treasury returns capital (`./scripts/demo_nav_testnet.sh`).
 
 ![baUSD testnet demo: a DeFindex vault created from the public factory allocates 100 USDC into baUSD through the strategy adapter, then withdraws 40 atomically](media/demo-defindex.gif)
 
-A DeFindex vault created from PaltaLabs' public testnet factory, with baUSD as its
+A DeFindex vault created from DeFindex's public testnet factory, with baUSD as its
 strategy: deposit, invest, and an atomic withdrawal through request + claim
 (`./scripts/defindex_testnet.sh`).
 
