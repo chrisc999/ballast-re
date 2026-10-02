@@ -10,6 +10,12 @@ export const FRIENDBOT_URL = "https://friendbot.stellar.org";
 export const VAULT_ID = deployment.vault;
 export const TOKEN_ID = deployment.token;
 export const USDC_ID = deployment.usdc_sac;
+export const STRATEGY_ID = deployment.strategy;
+/** The DeFindex vault (created from DeFindex's public factory) that allocates to baUSD. */
+export const DEFINDEX_VAULT_ID = deployment.defindex_vault;
+/** Reflector's public testnet feed; the vault reads its USDC/USD price as a depeg guard. */
+export const REFLECTOR_ID = deployment.reflector_oracle;
+export const EXPLORER = "https://stellar.expert/explorer/testnet";
 /** Issuer of the mock USDC classic asset; accounts hold it via a trustline,
  *  exactly as they would real USDC. */
 export const USDC_ISSUER = deployment.deployer;

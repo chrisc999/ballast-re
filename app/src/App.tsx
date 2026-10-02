@@ -8,6 +8,10 @@ import {
   USDC_ID,
   USDC_ISSUER,
   VAULT_ID,
+  STRATEGY_ID,
+  DEFINDEX_VAULT_ID,
+  REFLECTOR_ID,
+  EXPLORER,
 } from "./config";
 import {
   addUsdcTrustline,
@@ -29,6 +33,21 @@ type VaultState = {
   navStale: boolean;
   suspended: boolean;
   allowlistOn: boolean;
+};
+
+type PriceData = { price: bigint; timestamp: bigint };
+
+/** What the page shows about the two external integrations: Reflector (the USDC
+ *  price the vault checks on every deposit) and DeFindex (a DeFindex vault using
+ *  baUSD as its strategy). Loaded separately so a hiccup there never blanks the
+ *  vault card. */
+type Integrations = {
+  usdcPrice: PriceData | null;
+  reflectorDecimals: number;
+  defindexName: string;
+  strategyName: string;
+  strategyActive: boolean;
+  invested: bigint;
 };
 
 type WalletState = {
@@ -70,6 +89,7 @@ export default function App() {
   const [address, setAddress] = useState<string | null>(null);
   const [wrongNetwork, setWrongNetwork] = useState(false);
   const [vault, setVault] = useState<VaultState | null>(null);
+  const [integrations, setIntegrations] = useState<Integrations | null>(null);
   const [wallet, setWallet] = useState<WalletState | null>(null);
   const [depositIn, setDepositIn] = useState("");
   const [redeemIn, setRedeemIn] = useState("");
@@ -117,6 +137,28 @@ export default function App() {
           v<boolean>(VAULT_ID, "allowlist_enabled"),
         ]);
       setVault({ sharePrice, totalAssets, totalShares, sleeve, navStale, suspended, allowlistOn });
+
+      try {
+        type DfAsset = { strategies: { address: string; name: string; paused: boolean }[] };
+        const [usdcPrice, reflectorDecimals, defindexName, assets, invested] = await Promise.all([
+          v<PriceData | null>(VAULT_ID, "settlement_asset_price"),
+          v<number>(REFLECTOR_ID, "decimals"),
+          v<string>(DEFINDEX_VAULT_ID, "name"),
+          v<DfAsset[]>(DEFINDEX_VAULT_ID, "get_assets"),
+          v<bigint>(STRATEGY_ID, "balance", [scAddress(DEFINDEX_VAULT_ID)]),
+        ]);
+        const strat = assets[0]?.strategies.find((x) => x.address === STRATEGY_ID);
+        setIntegrations({
+          usdcPrice,
+          reflectorDecimals,
+          defindexName: defindexName.replace(/^DeFindex-Vault-/, ""),
+          strategyName: strat?.name ?? "—",
+          strategyActive: !!strat && !strat.paused,
+          invested,
+        });
+      } catch {
+        setIntegrations(null);
+      }
 
       if (address) {
         const who = scAddress(address);
@@ -268,6 +310,52 @@ export default function App() {
           ) : (
             <p className="empty">Connect Freighter to see balances and transact.</p>
           )}
+        </div>
+      </section>
+
+      <section className="grid">
+        <div className="card">
+          <h2>USDC price · Reflector</h2>
+          <p className="hint">Every deposit checks Reflector's live USDC/USD price and is refused if USDC is more than 2% off $1 or the price is over an hour old.</p>
+          <dl>
+            <div>
+              <dt>USDC / USD</dt>
+              <dd className="mono big">
+                {integrations?.usdcPrice
+                  ? (Number(integrations.usdcPrice.price) / 10 ** integrations.reflectorDecimals).toFixed(4)
+                  : "—"}
+              </dd>
+            </div>
+            <div>
+              <dt>Updated</dt>
+              <dd className="mono">
+                {integrations?.usdcPrice
+                  ? new Date(Number(integrations.usdcPrice.timestamp) * 1000).toLocaleTimeString()
+                  : "—"}
+              </dd>
+            </div>
+          </dl>
+          <a href={`${EXPLORER}/contract/${REFLECTOR_ID}`} target="_blank" rel="noreferrer">
+            Reflector feed on stellar.expert
+          </a>
+        </div>
+
+        <div className="card">
+          <h2>DeFindex strategy</h2>
+          <p className="hint">A DeFindex vault, created from DeFindex's public factory, allocates its USDC into baUSD.</p>
+          <dl>
+            <div><dt>DeFindex vault</dt><dd>{integrations?.defindexName ?? "—"}</dd></div>
+            <div>
+              <dt>Strategy</dt>
+              <dd>
+                {integrations ? `${integrations.strategyName} · ${integrations.strategyActive ? "active" : "paused"}` : "—"}
+              </dd>
+            </div>
+            <div><dt>Invested in baUSD</dt><dd className="mono">{integrations ? fmt(integrations.invested) : "—"} USDC</dd></div>
+          </dl>
+          <a href={`${EXPLORER}/contract/${DEFINDEX_VAULT_ID}`} target="_blank" rel="noreferrer">
+            DeFindex vault on stellar.expert
+          </a>
         </div>
       </section>
 
