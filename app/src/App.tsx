@@ -322,6 +322,8 @@ export default function App() {
         <a href={`https://stellar.expert/explorer/testnet/contract/${VAULT_ID}`} target="_blank" rel="noreferrer">
           view on stellar.expert
         </a>
+        <a href="coverage/">test coverage</a>
+        <a href="https://github.com/chrisc999/ballast-re" target="_blank" rel="noreferrer">source</a>
         <span>Testnet only · unaudited · test USDC has no value</span>
       </footer>
     </div>
