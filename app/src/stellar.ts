@@ -132,6 +132,7 @@ export async function addUsdcTrustline(
     if (res.status === "SUCCESS") return;
     if (res.status === "FAILED") throw new Error("The trustline transaction failed.");
   }
+  throw new Error("Timed out waiting for confirmation. Check the transaction on stellar.expert.");
 }
 
 /** Map a raw simulation/submission failure onto the vault's typed errors. */
