@@ -12,9 +12,10 @@
 # live instance would leave the stored Config undeserializable and the new keys absent. New
 # addresses each run is the correct behaviour here, not a limitation.
 #
-# The settlement-asset depeg guard is deliberately left UNCONFIGURED on testnet: the mock
-# USDC below is ours and no public oracle carries it. On mainnet, call set_price_oracle with
-# a real feed.
+# The settlement-asset depeg guard reads Reflector's public testnet feed for USDC/USD
+# (REFLECTOR_ORACLE, asset Other("USDC")). Our mock USDC has no feed of its own, so on
+# testnet the guard checks the real USDC price as a stand-in; on mainnet it checks the real
+# USDC it settles in. Set REFLECTOR_ORACLE= (empty) to deploy without the guard.
 #
 # USDC on testnet: we deploy our OWN mock USDC (issuer = the deployer) so the demo can mint
 # test USDC freely. On mainnet this is swapped for the real Circle USDC SAC.
@@ -26,6 +27,7 @@ NETWORK="${NETWORK:-testnet}"
 DEPLOYER="${DEPLOYER:-ballast-deployer}"
 OUT_DIR="$(cd "$(dirname "$0")/.." && pwd)/deploy"
 WASM_DIR="$(cd "$(dirname "$0")/.." && pwd)/target/wasm32v1-none/release"
+REFLECTOR_ORACLE="${REFLECTOR_ORACLE-CCYOZJCOPG34LLQQ7N24YXBM7LL62R7ONMZ3G6WZAAYPB5OYKOMJRN63}"
 TOKEN_NAME="${TOKEN_NAME:-Ballast USD}"
 TOKEN_SYMBOL="${TOKEN_SYMBOL:-baUSD}"
 NOTICE_PERIOD="${NOTICE_PERIOD:-0}"
@@ -112,6 +114,14 @@ STRATEGY_ID="$(stellar contract deploy \
   --init_args "[{\"address\":\"$VAULT_ID\"}]")"
 echo "    strategy: $STRATEGY_ID"
 
+ORACLE_CONFIGURED=false
+if [ -n "$REFLECTOR_ORACLE" ]; then
+  echo "==> Wiring the USDC depeg guard to Reflector ($REFLECTOR_ORACLE)"
+  stellar contract invoke --id "$VAULT_ID" --source "$DEPLOYER" --network "$NETWORK" -- \
+    set_price_oracle --oracle "\"$REFLECTOR_ORACLE\"" --asset '{"Other":"USDC"}' >/dev/null
+  ORACLE_CONFIGURED=true
+fi
+
 mkdir -p "$OUT_DIR"
 cat > "$OUT_DIR/testnet.json" <<JSON
 {
@@ -124,7 +134,8 @@ cat > "$OUT_DIR/testnet.json" <<JSON
   "strategy": "$STRATEGY_ID",
   "notice_period": $NOTICE_PERIOD,
   "nav_cadence_secs": $NAV_CADENCE,
-  "price_oracle_configured": false
+  "price_oracle_configured": $ORACLE_CONFIGURED,
+  "reflector_oracle": "$REFLECTOR_ORACLE"
 }
 JSON
 
