@@ -46,6 +46,10 @@ const fmt = (v: bigint) => {
   return `${neg ? "-" : ""}${whole.toLocaleString("en-US")}${frac ? "." + frac : ""}`;
 };
 
+// Share price keeps all 7 decimals so small NAV moves are visible (1.0099999, not 1.01).
+const fmtPrice = (v: bigint) =>
+  `${(v / SCALE).toString()}.${(v % SCALE).toString().padStart(DECIMALS, "0")}`;
+
 const parseAmount = (s: string): bigint | null => {
   const m = s.trim().match(/^(\d+)(?:\.(\d{1,7}))?$/);
   if (!m) return null;
@@ -221,7 +225,7 @@ export default function App() {
         <div className="card">
           <h2>Vault</h2>
           <dl>
-            <div><dt>Share price</dt><dd className="mono big">{vault ? fmt(vault.sharePrice) : "—"}</dd></div>
+            <div><dt>Share price</dt><dd className="mono big">{vault ? fmtPrice(vault.sharePrice) : "—"}</dd></div>
             <div><dt>Attested NAV</dt><dd className="mono">{vault ? fmt(vault.totalAssets) : "—"} USDC</dd></div>
             <div><dt>Shares outstanding</dt><dd className="mono">{vault ? fmt(vault.totalShares) : "—"}</dd></div>
             <div><dt>Liquidity sleeve</dt><dd className="mono">{vault ? fmt(vault.sleeve) : "—"} USDC</dd></div>
