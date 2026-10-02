@@ -31,14 +31,15 @@ VAULT="$(field vault)"; TOKEN="$(field token)"; USDC="$(field usdc_sac)"
 STRATEGY="$(field strategy)"; DEP_PK="$(field deployer)"
 DFVAULT="$(field defindex_vault)"
 
-call()  { stellar contract invoke --id "$1" --source "$2" --network "$NETWORK" -- "${@:3}" 2>/dev/null; }
-silent(){ stellar contract invoke --id "$1" --source "$2" --network "$NETWORK" -- "${@:3}" >/dev/null 2>&1; }
+# Quiet stellar-cli wrappers that keep an explorer link per transaction (call, silent,
+# txrun, txlinks).
+source "$ROOT/scripts/explorer.sh"
 usd()   { call "$USDC"  "$DEPLOYER" balance --id "$1" | tr -d '"'; }
 bau()   { call "$TOKEN" "$DEPLOYER" balance --account "$1" | tr -d '"'; }
 h()     { python3 -c "import sys;print(f'{int(sys.argv[1])/1e7:,.2f}')" "$1"; }
 sa()    { printf '%s…%s' "${1:0:6}" "${1: -4}"; }
 line()  { printf '   %-34s %s\n' "$1" "$2"; }
-hdr()   { printf '\n%s\n' "$1"; }
+hdr()   { txlinks; printf '\n%s\n' "$1"; }
 
 printf '\n════════════════════════════════════════════════════════════\n'
 printf '   baUSD  ·  selectable as a DeFindex strategy\n'
@@ -76,7 +77,7 @@ line "asset" "test USDC  ·  strategy: baUSD"
 hdr "[3/6]  A depositor is funded with test USDC"
 stellar keys generate "$USER_ID" --network "$NETWORK" --fund >/dev/null 2>&1 || true
 USER_PK="$(stellar keys address "$USER_ID")"
-stellar tx new change-trust --source-account "$USER_ID" --network "$NETWORK" --line "USDC:$DEP_PK" >/dev/null 2>&1
+txrun change_trust stellar tx new change-trust --source-account "$USER_ID" --network "$NETWORK" --line "USDC:$DEP_PK" >/dev/null
 silent "$USDC" "$DEPLOYER" mint --to "$USER_PK" --amount "$FUND_USDC"
 line "depositor" "$(sa "$USER_PK")"
 line "USDC balance" "$(h "$(usd "$USER_PK")")"
@@ -111,5 +112,11 @@ line "withdrawn" "$(h "$WITHDRAW") df-shares"
 line "depositor USDC" "$(h "$(usd "$USER_PK")")"
 line "adapter position (strategy)" "$(h "$(call "$STRATEGY" "$DEPLOYER" balance --from "$DFVAULT" | tr -d '"')") USDC"
 
-printf '\nbaUSD is live as a DeFindex strategy on testnet: %s\n' "$DFVAULT"
-printf 'DeFindex vault: https://stellar.expert/explorer/testnet/contract/%s\n\n' "$DFVAULT"
+txlinks
+
+printf '\nVerify on stellar.expert\n'
+line "depositor account (all its txs)" "$EXPLORER/account/$USER_PK"
+line "DeFindex vault" "$EXPLORER/contract/$DFVAULT"
+line "baUSD strategy adapter" "$EXPLORER/contract/$STRATEGY"
+line "baUSD vault" "$EXPLORER/contract/$VAULT"
+printf '\nbaUSD is live as a DeFindex strategy on testnet: %s\n\n' "$DFVAULT"

@@ -3,7 +3,11 @@
 # on Stellar testnet. Clean output suitable for screen-recording.
 # Run AFTER scripts/deploy_testnet.sh — against a FRESH deploy, so share price starts at
 # exactly 1.0 and the printed figures are pristine. Re-running against a vault that has
-# already been attested still works, it just starts mid-story.
+# already been attested still works, it just starts mid-story: step 7 trims any sleeve
+# surplus left by earlier runs so the partial fill still shows.
+#
+# The run temporarily turns the allowlist on and moves the treasury role to a throwaway
+# key. Both are restored on exit, including when a step fails part-way.
 #
 #   ./scripts/demo_nav_testnet.sh
 #
@@ -25,8 +29,9 @@ VAULT="$(field vault)"; TOKEN="$(field token)"; USDC="$(field usdc_sac)"
 ORACLE="$(field oracle)"; STRATEGY="$(field strategy)"; DEP_PK="$(field deployer)"
 CADENCE="$(field nav_cadence_secs)"
 
-call()  { stellar contract invoke --id "$1" --source "$2" --network "$NETWORK" -- "${@:3}" 2>/dev/null; }
-silent(){ stellar contract invoke --id "$1" --source "$2" --network "$NETWORK" -- "${@:3}" >/dev/null 2>&1; }
+# Quiet stellar-cli wrappers that keep an explorer link per transaction (call, silent,
+# txrun, txlinks).
+source "$ROOT/scripts/explorer.sh"
 # For calls that may legitimately no-op on a re-run (e.g. `record` when the vault has not
 # re-attested since last time). A failure here is expected, not a fault.
 maybe() { silent "$@" || true; }
@@ -44,7 +49,22 @@ h()     { python3 -c "import sys;print(f'{int(sys.argv[1])/1e7:,.2f}')" "$1"; }
 p()     { python3 -c "import sys;print(f'{int(sys.argv[1])/1e7:,.7f}')" "$1"; }
 sa()    { printf '%s…%s' "${1:0:6}" "${1: -4}"; }
 line()  { printf '   %-30s %s\n' "$1" "$2"; }
-hdr()   { printf '\n%s\n' "$1"; }
+hdr()   { txlinks; printf '\n%s\n' "$1"; }
+
+# Put the vault back the way we found it - allowlist switch and treasury role - on any
+# exit, so an aborted run cannot break demo_testnet.sh or the next rehearsal.
+ORIG_ALLOWLIST="$(vaultv allowlist_enabled)"
+ORIG_TREASURY="$(call "$VAULT" "$DEPLOYER" get_config | python3 -c "import json,sys;print(json.load(sys.stdin)['treasury'])")"
+cleanup() {
+  local rc=$?
+  silent "$VAULT" "$DEPLOYER" set_allowlist_enabled --enabled "$ORIG_ALLOWLIST" || true
+  silent "$VAULT" "$DEPLOYER" set_treasury --new_treasury "$ORIG_TREASURY" || true
+  rm -f "$_TXLOG"
+  if [ "$rc" -ne 0 ]; then
+    printf '\n   ✗ demo aborted (exit %s); vault settings restored. Re-run to retry.\n\n' "$rc"
+  fi
+}
+trap cleanup EXIT
 
 printf '\n════════════════════════════════════════════════════════════\n'
 printf '   baUSD  ·  attested NAV, published price, compliance\n'
@@ -54,12 +74,12 @@ hdr "[1/8]  Fresh LP and treasury accounts, funded with test USDC"
 TREASURY_ID="${TREASURY_ID:-ballast-treasury-$(date +%s)}"
 stellar keys generate "$TREASURY_ID" --network "$NETWORK" --fund >/dev/null 2>&1 || true
 TREASURY_PK="$(stellar keys address "$TREASURY_ID")"
-stellar tx new change-trust --source-account "$TREASURY_ID" --network "$NETWORK" --line "USDC:$DEP_PK" >/dev/null 2>&1
+txrun change_trust stellar tx new change-trust --source-account "$TREASURY_ID" --network "$NETWORK" --line "USDC:$DEP_PK" >/dev/null
 silent "$VAULT" "$DEPLOYER" set_treasury --new_treasury "$TREASURY_PK"
 stellar keys generate "$USER_ID" --network "$NETWORK" --fund >/dev/null 2>&1 || \
   stellar keys fund "$USER_ID" --network "$NETWORK" >/dev/null 2>&1 || true
 USER_PK="$(stellar keys address "$USER_ID")"
-stellar tx new change-trust --source-account "$USER_ID" --network "$NETWORK" --line "USDC:$DEP_PK" >/dev/null 2>&1
+txrun change_trust stellar tx new change-trust --source-account "$USER_ID" --network "$NETWORK" --line "USDC:$DEP_PK" >/dev/null
 silent "$USDC" "$DEPLOYER" mint --to "$USER_PK" --amount "$FUND_USDC"
 line "LP account" "$(sa "$USER_PK")"
 line "treasury account" "$(sa "$TREASURY_PK")"
@@ -108,12 +128,19 @@ maybe "$ORACLE" "$DEPLOYER" record
 line "feed lastprice" "$(call "$ORACLE" "$DEPLOYER" lastprice --asset "{\"Stellar\":\"$TOKEN\"}")"
 
 hdr "[7/8]  Redemption partially fills — the gain is not in the sleeve yet"
+# Earlier runs (or the DeFindex walkthrough) can leave extra USDC in the sleeve. Send the
+# surplus out to treaties first so the sleeve holds only this LP's deposit, as it does on
+# a fresh deploy. deploy_capital is NAV-neutral, so the share price is unaffected.
+SURPLUS=$(( $(vaultv sleeve_balance) - DEPOSIT ))
+if [ "$SURPLUS" -gt 0 ]; then
+  silent "$VAULT" "$TREASURY_ID" deploy_capital --amount "$SURPLUS"
+fi
 line "vault sleeve (on-chain USDC)" "$(h "$(vaultv sleeve_balance)")"
 line "owed at claim-time NAV" "$(h "$(call "$VAULT" "$DEPLOYER" convert_to_assets --shares "$SHARES" | tr -d '"')")"
 silent "$VAULT" "$USER_ID" request_redemption --from "$USER_PK" --shares "$SHARES"
 PAID1="$(call "$VAULT" "$USER_ID" claim_redemption --from "$USER_PK" | tr -d '"')"
 line "paid now" "$(h "$PAID1")   ← limited by the sleeve"
-line "still queued" "$(h "$(call "$VAULT" "$DEPLOYER" get_redemption --who "$USER_PK" | python3 -c "import sys,json;print(json.load(sys.stdin)['shares'])" | tr -d '"')") baUSD"
+line "still queued" "$(h "$(call "$VAULT" "$DEPLOYER" get_redemption --who "$USER_PK" | python3 -c "import sys,json;r=json.load(sys.stdin);print(r['shares'] if r else 0)" | tr -d '"')") baUSD"
 
 hdr "[8/8]  Treasury returns capital from treaties; the claim completes"
 silent "$USDC" "$DEPLOYER" mint --to "$TREASURY_PK" --amount 100000000
@@ -123,9 +150,13 @@ PAID2="$(call "$VAULT" "$USER_ID" claim_redemption --from "$USER_PK" | tr -d '"'
 line "paid on completion" "$(h "$PAID2")"
 line "total returned to LP" "$(h "$((PAID1 + PAID2))")   ← more than the $(h "$DEPOSIT") deposited"
 line "redemption fully settled" "$(call "$VAULT" "$DEPLOYER" get_redemption --who "$USER_PK")"
+txlinks
 
-# Leave the vault as we found it so repeat runs start clean.
-silent "$VAULT" "$DEPLOYER" set_allowlist_enabled --enabled false
+printf '\nVerify on stellar.expert\n'
+line "LP account (all its txs)" "$EXPLORER/account/$USER_PK"
+line "vault contract" "$EXPLORER/contract/$VAULT"
+line "SEP-40 price feed" "$EXPLORER/contract/$ORACLE"
+line "baUSD token" "$EXPLORER/contract/$TOKEN"
 
 printf '\n════════════════════════════════════════════════════════════\n'
 printf '   NAV attested on-chain · price published via SEP-40\n'
