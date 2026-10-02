@@ -130,7 +130,10 @@ impl StrategyContract {
         let minted = VaultClient::new(e, &vault).subscribe(&me, &amount);
 
         let held = read_shares(e, &from);
-        write_shares(e, &from, held + minted);
+        let total = held
+            .checked_add(minted)
+            .ok_or(StrategyError::InvalidAmount)?;
+        write_shares(e, &from, total);
 
         Self::balance(e, from)
     }
@@ -233,7 +236,9 @@ impl StrategyContract {
 
     /// No-op. baUSD yield accrues through attested NAV rather than claimable rewards, so
     /// there is nothing to harvest — the position simply revalues.
-    pub fn harvest(_e: &Env, _from: Address, _data: Option<Bytes>) -> Result<(), StrategyError> {
+    /// DeFindex calls it routinely, so it still keeps the adapter's instance alive.
+    pub fn harvest(e: &Env, _from: Address, _data: Option<Bytes>) -> Result<(), StrategyError> {
+        bump_instance(e);
         Ok(())
     }
 
@@ -245,6 +250,7 @@ impl StrategyContract {
 
     /// baUSD shares this adapter holds for `from`.
     pub fn shares_of(e: &Env, from: Address) -> i128 {
+        bump_instance(e);
         read_shares(e, &from)
     }
 }
@@ -266,18 +272,30 @@ fn authorize_token_transfer(e: &Env, token: &Address, from: &Address, to: &Addre
     ]);
 }
 
+/// Every entrypoint that touches a position reads the vault address, so bumping the
+/// instance here keeps the adapter alive for as long as DeFindex is using it.
 fn read_vault(e: &Env) -> Result<Address, StrategyError> {
-    e.storage()
-        .instance()
+    let s = e.storage().instance();
+    let vault = s
         .get(&DataKey::Vault)
-        .ok_or(StrategyError::NotInitialized)
+        .ok_or(StrategyError::NotInitialized)?;
+    s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    Ok(vault)
 }
 
 fn read_underlying(e: &Env) -> Result<Address, StrategyError> {
+    let s = e.storage().instance();
+    let asset = s
+        .get(&DataKey::Underlying)
+        .ok_or(StrategyError::NotInitialized)?;
+    s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    Ok(asset)
+}
+
+fn bump_instance(e: &Env) {
     e.storage()
         .instance()
-        .get(&DataKey::Underlying)
-        .ok_or(StrategyError::NotInitialized)
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 }
 
 fn read_shares(e: &Env, who: &Address) -> i128 {

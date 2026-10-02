@@ -85,6 +85,8 @@ strategy: deposit, invest, and an atomic withdrawal through request + claim
 - **NAV is attested, not traded** — baUSD has no market, so its price is published from
   off-chain treaty performance rather than discovered. NAV can fall. Routine updates are
   bounded in size and frequency; anything larger needs governance as well as the quorum.
+  Changing who sits on the quorum goes through the same 48h governance timelock as an
+  upgrade, so governance cannot install its own attestors and move NAV in one sitting.
   Stale NAV blocks new deposits and never blocks exits.
 
 ## Toolchain (pinned)
@@ -173,11 +175,11 @@ Live testnet contract IDs (see [`deploy/testnet.json`](deploy/testnet.json)):
 
 | Contract | ID |
 |---|---|
-| Vault | `CA6CPFXGVO7BAOW7DWGBIXEKN4EHJRNKYNN464EKRUCVTYG6QCWOUIU4` |
-| baUSD token | `CDIMBZ6CCHJ3YDDZCFM7NPHJ4BD6RXKL6KEGJLGKYIJKGPZD2JQ4LQRX` |
-| SEP-40 price feed | `CC7HH575C7HERR3C25QSMH3XBNAQLFHCLMLF2APIXGHQN2HKD5BQS5IK` |
-| DeFindex strategy | `CCOZIVFCJPRMZ74ZA774PCHICOTFV7XTZW3ZO4WRAGBTWR6YU2SXPK4U` |
-| DeFindex vault (holds the strategy) | `CCM3LEAB5IBTQ3OYACDFBI7YAC2SCUM55HVA2M667N7EYEOK77LVOL4C` |
+| Vault | `CDVPVQE5VLOKUEPXUAFM7XBH7TMHRAGFVZUW5VED4Y4BBMD2C6JKQBON` |
+| baUSD token | `CBDZN7LEXWQQM6TKVHIIZOVWWZL5AQSEA3DTCSQ3BZCJOFL4JNLWCCKP` |
+| SEP-40 price feed | `CCIVZSYHJTGTNZ3Y7Z4LY3325GO2TTIDD2MVR3WN3CGR4ANBT5FWIEJ5` |
+| DeFindex strategy | `CD4PIJLCSRRR4ZUA2FOBWIXF3FJOGSSQVKL7MDS5IJJFEHQO6CZVW5MF` |
+| DeFindex vault (holds the strategy) | created by `scripts/defindex_testnet.sh`; recorded in `deploy/testnet.json` |
 | Mock USDC (SAC) | `CAJBB6LISKXJN5ON2CCFTGPGEUMK7RNH3SGWIXXHD6Z4NFWZTWKINW2U` |
 
 **NAV cadence on testnet** is set to 60s rather than the 20h default, so the

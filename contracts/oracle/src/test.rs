@@ -218,6 +218,31 @@ fn prices_caps_at_what_exists() {
     assert_eq!(h.feed.prices(&h.asset(), &50).unwrap().len(), 2);
 }
 
+/// A query reads a bounded number of history entries no matter how full the ring is, so
+/// it cannot outgrow the network's per-transaction read limit.
+#[test]
+fn history_queries_are_bounded() {
+    let h = setup();
+    h.seed(100_000_000);
+    h.feed.record();
+    let first = h.feed.lastprice(&h.asset()).unwrap();
+    let mut nav: i128 = 100_000_000;
+    for _ in 0..40 {
+        nav += nav / 1_000; // +0.1% per attestation, well inside the cap
+        h.attest(nav);
+        h.feed.record();
+    }
+
+    let series = h.feed.prices(&h.asset(), &50).unwrap();
+    assert_eq!(series.len(), 30);
+    assert_eq!(
+        series.get(0).unwrap(),
+        h.feed.lastprice(&h.asset()).unwrap()
+    );
+    // the very first point is now beyond the lookback window
+    assert_eq!(h.feed.price(&h.asset(), &first.timestamp), None);
+}
+
 /// "At or before" is the honest semantic for attested NAV: never invent a value for a
 /// moment we had not yet attested, and never report a price from the future.
 #[test]

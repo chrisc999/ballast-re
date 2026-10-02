@@ -6,8 +6,6 @@
 //! classic ERC-4626 inflation attack, since tokens donated directly to the vault are not
 //! counted.
 //!
-//! Sub-steps so far: storage/roles/init/share-math (1), `subscribe` + pause + token wiring
-//! (2). `request_redemption`/`claim_redemption` (3), upgrade + events (4) follow.
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
@@ -37,9 +35,9 @@ pub trait Sep40PriceFeed {
     fn decimals(env: Env) -> u32;
 }
 
-/// Minimal client for baUSD's owner-only admin interface. Lets the vault call `mint`
-/// (and, from sub-step 3, `burn`) on the deployed baUSD token by address, without
-/// compiling the token crate into the vault's wasm.
+/// Minimal client for baUSD's owner-only admin interface. Lets the vault call `mint` on
+/// the deployed baUSD token by address, without compiling the token crate into the
+/// vault's wasm. (Burning escrowed shares goes through the standard `TokenClient`.)
 #[contractclient(name = "BaUsdClient")]
 pub trait BaUsdAdmin {
     fn mint(env: Env, to: Address, amount: i128);
@@ -65,10 +63,11 @@ const VIRTUAL_SHARES: i128 = 1;
 /// 7 decimals.
 const MIN_INITIAL_DEPOSIT: i128 = 10_000_000;
 
-/// Governance upgrade timelock, fixed at 24h at compile time. Deliberately NOT a config
-/// parameter: an admin who can shorten the timelock has defeated it, so changing this
-/// requires a contract upgrade, which is itself subject to the current timelock.
-const UPGRADE_TIMELOCK_SECS: u64 = 86_400;
+/// Governance timelock for upgrades and attestor-set changes, fixed at 48h at compile
+/// time. Deliberately NOT a config parameter: an admin who can shorten the timelock has
+/// defeated it, so changing this requires a contract upgrade, which is itself subject to
+/// the current timelock.
+const UPGRADE_TIMELOCK_SECS: u64 = 48 * 60 * 60;
 
 /// How far the settlement asset (USDC) may drift from $1 before new deposits are refused.
 /// 2% — wide enough to ignore ordinary noise, tight enough that a real depeg stops the
@@ -191,6 +190,12 @@ pub struct NavUpdated {
     pub extraordinary: bool,
 }
 #[contractevent]
+pub struct AttestorsProposed {
+    pub count: u32,
+    pub threshold: u32,
+    pub eta: u64,
+}
+#[contractevent]
 pub struct AttestorsUpdated {
     pub count: u32,
     pub threshold: u32,
@@ -264,9 +269,10 @@ pub enum Error {
     NoSharesOutstanding = 24,
     RedemptionsSuspended = 25,
     NotAllowed = 26,
-    CadenceTooLong = 29,
     SettlementAssetDepegged = 27,
     OraclePriceUnavailable = 28,
+    CadenceTooLong = 29,
+    NoPendingAttestors = 30,
 }
 
 /// Vault configuration and role addresses. Separation of duties: each authority can do
@@ -303,13 +309,23 @@ pub struct PendingUpgrade {
     pub eta: u64,
 }
 
+/// A queued change to the attestor quorum: the new set, its threshold, and the earliest
+/// execution time.
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingAttestors {
+    pub attestors: Vec<Address>,
+    pub threshold: u32,
+    pub eta: u64,
+}
+
 #[contracttype]
 pub enum DataKey {
     Config,
     Token, // baUSD token address (vault is its owner); set once via set_token
     TotalShares,
     TotalAssets,    // bookkept NAV
-    NavLastUpdated, // freshness timestamp (used by update_nav)
+    NavLastUpdated, // last attestation time: cadence floor and staleness gate
     NavBaseline,    // total_assets as of the last attestation; bounds the delta cap
     NavInterval,    // minimum spacing between routine attestations, seconds
     Paused,
@@ -322,6 +338,7 @@ pub enum DataKey {
     AttestationThreshold, // m of n: how many of them must sign one update
     PendingAdmin,         // admin handover awaiting acceptance by the proposed address
     PendingUpgrade,
+    PendingAttestors,    // attestor-set change awaiting the governance timelock
     Redemption(Address), // per-user pending redemption (persistent storage)
 }
 
@@ -357,7 +374,8 @@ impl VaultContract {
         let s = e.storage().instance();
         s.set(&DataKey::Config, &config);
         // Seed a 1-of-1 attestor set from the deploy-time authority. Governance widens it
-        // to a real m-of-n quorum via `set_attestors` before any capital is at risk; the
+        // to a real m-of-n quorum via `propose_attestors` / `execute_attestors` (timelocked)
+        // before any capital is at risk; the
         // code path is identical either way, so there is no special-case single-signer
         // branch to get wrong later.
         let mut seed = Vec::new(e);
@@ -479,7 +497,7 @@ impl VaultContract {
 
     /// Request to redeem `shares`. The shares are escrowed in the vault immediately; the
     /// USDC payout is computed at claim time (claim-time NAV) after the notice period.
-    /// One pending request per address (a full queue is planned).
+    /// One pending request per address.
     pub fn request_redemption(e: &Env, from: Address, shares: i128) {
         from.require_auth();
         ensure_not_paused(e);
@@ -496,9 +514,6 @@ impl VaultContract {
         let config = read_config(e);
         let token_addr = read_token(e);
 
-        // Escrow the redeemer's baUSD into the vault (reverts if their balance is short).
-        TokenClient::new(e, &token_addr).transfer(&from, e.current_contract_address(), &shares);
-
         let claimable_at = e
             .ledger()
             .timestamp()
@@ -509,9 +524,11 @@ impl VaultContract {
             claimable_at,
         };
         e.storage().persistent().set(&key, &req);
-        // TTL must outlive the notice period, or the entry archives before it can ever be
-        // claimed and the escrowed shares are only recoverable via state restoration.
-        bump_request_ttl(e, &key, config.notice_period);
+        keep_request_claimable(e, &from, &token_addr, config.notice_period);
+
+        // Escrow the redeemer's baUSD into the vault last (checks-effects-interactions);
+        // reverts the whole request if their balance is short.
+        TokenClient::new(e, &token_addr).transfer(&from, e.current_contract_address(), &shares);
 
         RedemptionRequested {
             from,
@@ -606,7 +623,7 @@ impl VaultContract {
                 claimable_at: req.claimable_at,
             };
             e.storage().persistent().set(&key, &rest);
-            bump_request_ttl(e, &key, config.notice_period);
+            keep_request_claimable(e, &from, &token_addr, config.notice_period);
         } else {
             e.storage().persistent().remove(&key);
         }
@@ -754,12 +771,18 @@ impl VaultContract {
         .publish(e);
     }
 
-    /// Replace the NAV attestation quorum. Admin-gated.
+    /// Queue a replacement NAV attestation quorum, executable after the governance
+    /// timelock. Admin-gated. A fresh proposal replaces any pending one.
+    ///
+    /// Timelocked for the same reason upgrades are: `update_nav_extraordinary` needs
+    /// governance AND the quorum, and an instant swap would let governance install a
+    /// quorum it controls and write any NAV in one sitting. The delay makes such a change
+    /// visible on-chain (event) for the whole timelock before it can take effect.
     ///
     /// `threshold` must be at least 1 and no greater than the number of attestors -
     /// a threshold above the set size would make NAV permanently un-updatable, and a
     /// threshold of zero would let anyone attest.
-    pub fn set_attestors(e: &Env, attestors: Vec<Address>, threshold: u32) {
+    pub fn propose_attestors(e: &Env, attestors: Vec<Address>, threshold: u32) {
         read_config(e).admin.require_auth();
         if threshold == 0 || threshold > attestors.len() {
             panic_with_error!(e, Error::InvalidThreshold);
@@ -775,16 +798,54 @@ impl VaultContract {
             }
         }
 
+        let eta = e
+            .ledger()
+            .timestamp()
+            .checked_add(UPGRADE_TIMELOCK_SECS)
+            .unwrap_or_else(|| panic_with_error!(e, Error::MathOverflow));
         let s = e.storage().instance();
-        s.set(&DataKey::Attestors, &attestors);
-        s.set(&DataKey::AttestationThreshold, &threshold);
+        s.set(
+            &DataKey::PendingAttestors,
+            &PendingAttestors {
+                attestors,
+                threshold,
+                eta,
+            },
+        );
+        s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        AttestorsProposed {
+            count: n,
+            threshold,
+            eta,
+        }
+        .publish(e);
+    }
+
+    /// Install a queued attestor quorum once its timelock has elapsed. Admin-gated.
+    pub fn execute_attestors(e: &Env) {
+        read_config(e).admin.require_auth();
+        let s = e.storage().instance();
+        let pending: PendingAttestors = s
+            .get(&DataKey::PendingAttestors)
+            .unwrap_or_else(|| panic_with_error!(e, Error::NoPendingAttestors));
+        if e.ledger().timestamp() < pending.eta {
+            panic_with_error!(e, Error::TimelockNotElapsed);
+        }
+        s.remove(&DataKey::PendingAttestors);
+        s.set(&DataKey::Attestors, &pending.attestors);
+        s.set(&DataKey::AttestationThreshold, &pending.threshold);
         s.extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         AttestorsUpdated {
-            count: n,
-            threshold,
+            count: pending.attestors.len(),
+            threshold: pending.threshold,
         }
         .publish(e);
+    }
+
+    pub fn get_pending_attestors(e: &Env) -> Option<PendingAttestors> {
+        e.storage().instance().get(&DataKey::PendingAttestors)
     }
 
     pub fn get_attestors(e: &Env) -> Vec<Address> {
@@ -1513,6 +1574,26 @@ fn bump_request_ttl(e: &Env, key: &DataKey, notice_period: u64) {
     e.storage()
         .persistent()
         .extend_ttl(key, threshold, extend_to);
+}
+
+/// Keep a pending request claimable for its whole window. The request entry must outlive
+/// the notice period, or it archives before it can be claimed and the escrowed shares are
+/// recoverable only through state restoration. The same holds for everything the claim
+/// reads: the vault instance, the baUSD token instance (the claim burns through it) and
+/// the redeemer's allowlist flag (claims are compliance-gated). A request - or the queued
+/// remainder of a partial fill - may be the last activity for the whole window, so all of
+/// them are stretched over it.
+fn keep_request_claimable(e: &Env, from: &Address, token: &Address, notice_period: u64) {
+    bump_request_ttl(e, &DataKey::Redemption(from.clone()), notice_period);
+    let window = request_ttl_ledgers(notice_period);
+    let threshold = window.saturating_sub(DAY_IN_LEDGERS);
+    e.storage().instance().extend_ttl(threshold, window);
+    e.deployer().extend_ttl(token.clone(), threshold, window);
+    let allow_key = DataKey::Allowlist(from.clone());
+    let p = e.storage().persistent();
+    if p.has(&allow_key) {
+        p.extend_ttl(&allow_key, threshold, window);
+    }
 }
 
 fn read_config(e: &Env) -> Config {

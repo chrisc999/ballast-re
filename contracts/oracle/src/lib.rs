@@ -64,6 +64,12 @@ const HISTORY_LIFETIME_THRESHOLD: u32 = HISTORY_BUMP_AMOUNT - DAY_IN_LEDGERS;
 /// useful.
 const CAPACITY: u32 = 365;
 
+/// Most history points a single query will read. Each point is its own ledger entry, and
+/// a transaction's read footprint is capped by the network, so a query that walked the
+/// whole ring would start failing once the history filled up. 30 is a month of daily
+/// attestations - deeper lookbacks belong to an indexer, not an on-chain call.
+const MAX_LOOKBACK: u32 = 30;
+
 /// baUSD reports 7 decimals, and `share_price` is already scaled by 10^7.
 const DECIMALS: u32 = 7;
 
@@ -222,44 +228,45 @@ impl PriceFeedContract {
         Self::lastprice_inner(e)
     }
 
-    /// The most recent recorded price at or before `timestamp`.
+    /// The most recent recorded price at or before `timestamp`, looking back at most
+    /// `MAX_LOOKBACK` points.
     ///
     /// SEP-40 leaves the exact semantics to the implementer. "At or before" is the honest
     /// choice for attested NAV: it never invents a value for a moment we had not yet
-    /// attested, and it never reports a price from the future.
+    /// attested, and it never reports a price from the future. `record` only ever appends
+    /// strictly newer timestamps, so walking back from the newest point, the first one at
+    /// or before `timestamp` is the answer.
     pub fn price(e: &Env, asset: Asset, timestamp: u64) -> Option<PriceData> {
         if !Self::is_quoted(e, &asset) {
             return None;
         }
-        let mut best: Option<PriceData> = None;
-        for point in Self::history(e).iter() {
-            if point.timestamp <= timestamp {
-                let better = match &best {
-                    Some(b) => point.timestamp > b.timestamp,
-                    None => true,
-                };
-                if better {
-                    best = Some(point);
+        let count: u32 = read_instance(e, &DataKey::Count);
+        let depth = count.min(MAX_LOOKBACK);
+        for back in 0..depth {
+            if let Some(point) = Self::point_back(e, back) {
+                if point.timestamp <= timestamp {
+                    return Some(point);
                 }
             }
         }
-        best
+        None
     }
 
-    /// The last `records` prices, newest first.
+    /// The last `records` prices, newest first, capped at `MAX_LOOKBACK`.
     pub fn prices(e: &Env, asset: Asset, records: u32) -> Option<Vec<PriceData>> {
         if !Self::is_quoted(e, &asset) {
             return None;
         }
-        let history = Self::history(e); // oldest first
-        let len = history.len();
-        if len == 0 {
+        let count: u32 = read_instance(e, &DataKey::Count);
+        if count == 0 {
             return None;
         }
-        let take = if records < len { records } else { len };
+        let take = records.min(count).min(MAX_LOOKBACK);
         let mut out = Vec::new(e);
-        for i in 0..take {
-            out.push_back(history.get(len - 1 - i).unwrap());
+        for back in 0..take {
+            if let Some(point) = Self::point_back(e, back) {
+                out.push_back(point);
+            }
         }
         Some(out)
     }
@@ -275,28 +282,16 @@ impl PriceFeedContract {
         if count == 0 {
             return None;
         }
-        let head: u32 = read_instance(e, &DataKey::Head);
-        let last = (head + CAPACITY - 1) % CAPACITY;
-        e.storage().persistent().get(&DataKey::Point(last))
+        Self::point_back(e, 0)
     }
 
-    /// Recorded points, oldest first.
-    fn history(e: &Env) -> Vec<PriceData> {
-        let count: u32 = read_instance(e, &DataKey::Count);
+    /// The point `back` places behind the newest (0 = newest). Reads one entry.
+    fn point_back(e: &Env, back: u32) -> Option<PriceData> {
         let head: u32 = read_instance(e, &DataKey::Head);
-        let mut out = Vec::new(e);
-        for i in 0..count {
-            // Walk backwards from the newest so the ring is read in age order.
-            let slot = (head + CAPACITY - count + i) % CAPACITY;
-            if let Some(p) = e
-                .storage()
-                .persistent()
-                .get::<DataKey, PriceData>(&DataKey::Point(slot))
-            {
-                out.push_back(p);
-            }
-        }
-        out
+        let slot = (head + CAPACITY - 1 - back) % CAPACITY;
+        e.storage()
+            .persistent()
+            .get::<DataKey, PriceData>(&DataKey::Point(slot))
     }
 }
 

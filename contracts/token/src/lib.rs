@@ -28,6 +28,19 @@ use stellar_tokens::fungible::{burnable::FungibleBurnable, Base, FungibleToken};
 /// baUSD uses 7 decimals to match Stellar-native USDC and keep vault share math aligned.
 pub const DECIMALS: u32 = 7;
 
+// Instance storage (owner, metadata, total supply) expires like any other entry. The OZ
+// base bumps balances and allowances but not the instance, so every state-changing
+// entrypoint here extends it. ~5s ledgers => ~17,280/day.
+const DAY_IN_LEDGERS: u32 = 17_280;
+const INSTANCE_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
+const INSTANCE_LIFETIME_THRESHOLD: u32 = INSTANCE_BUMP_AMOUNT - DAY_IN_LEDGERS;
+
+fn bump_instance(e: &Env) {
+    e.storage()
+        .instance()
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
 #[contract]
 pub struct TokenContract;
 
@@ -38,6 +51,7 @@ impl TokenContract {
     pub fn __constructor(e: &Env, owner: Address, name: String, symbol: String) {
         Base::set_metadata(e, DECIMALS, name, symbol);
         set_owner(e, &owner);
+        bump_instance(e);
     }
 
     /// Mint new baUSD to `to`. Gated by `#[only_owner]`: requires the owner's (the
@@ -46,6 +60,7 @@ impl TokenContract {
     #[only_owner]
     pub fn mint(e: &Env, to: Address, amount: i128) {
         Base::mint(e, &to, amount);
+        bump_instance(e);
     }
 }
 
@@ -68,14 +83,17 @@ impl FungibleToken for TokenContract {
 
     fn transfer(e: &Env, from: Address, to: MuxedAddress, amount: i128) {
         Self::ContractType::transfer(e, &from, &to, amount);
+        bump_instance(e);
     }
 
     fn transfer_from(e: &Env, spender: Address, from: Address, to: Address, amount: i128) {
         Self::ContractType::transfer_from(e, &spender, &from, &to, amount);
+        bump_instance(e);
     }
 
     fn approve(e: &Env, owner: Address, spender: Address, amount: i128, live_until_ledger: u32) {
         Self::ContractType::approve(e, &owner, &spender, amount, live_until_ledger);
+        bump_instance(e);
     }
 
     fn decimals(e: &Env) -> u32 {
@@ -97,14 +115,16 @@ impl FungibleBurnable for TokenContract {
     /// vault's bookkept `total_shares` can never drift from the real total supply.
     fn burn(e: &Env, from: Address, amount: i128) {
         enforce_owner_auth(e);
-        Self::ContractType::burn(e, &from, amount)
+        Self::ContractType::burn(e, &from, amount);
+        bump_instance(e);
     }
 
     /// Allowance-based burn. Owner-gated for the same reason as `burn` — otherwise an
     /// approved spender could destroy a holder's shares outside the vault's accounting.
     fn burn_from(e: &Env, spender: Address, from: Address, amount: i128) {
         enforce_owner_auth(e);
-        Self::ContractType::burn_from(e, &spender, &from, amount)
+        Self::ContractType::burn_from(e, &spender, &from, amount);
+        bump_instance(e);
     }
 }
 

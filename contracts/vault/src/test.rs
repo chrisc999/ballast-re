@@ -1,12 +1,14 @@
 #![cfg(test)]
 use crate::{
-    assets_for_shares, shares_for_deposit, shares_for_deposit_ceil, Asset, PriceData,
+    assets_for_shares, shares_for_deposit, shares_for_deposit_ceil, Asset, Error, PriceData,
     VaultContract, VaultContractClient, MIN_INITIAL_DEPOSIT, PRICE_SCALE,
 };
 use ba_usd_token::{TokenContract, TokenContractClient};
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
-    testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
+    testutils::{
+        storage::Persistent as _, Address as _, Deployer as _, Ledger, MockAuth, MockAuthInvoke,
+    },
     token::{StellarAssetClient, TokenClient},
     Address, BytesN, Env, IntoVal, String, Vec,
 };
@@ -218,6 +220,15 @@ fn proof(e: &Env) -> BytesN<32> {
 }
 
 /// Advance past the NAV cadence floor (20h).
+/// Install an attestor quorum through the governance timelock: propose, wait it out,
+/// execute.
+fn install_attestors(e: &Env, vc: &VaultContractClient, set: &Vec<Address>, threshold: u32) {
+    vc.propose_attestors(set, &threshold);
+    e.ledger()
+        .with_mut(|l| l.timestamp += crate::UPGRADE_TIMELOCK_SECS);
+    vc.execute_attestors();
+}
+
 fn advance_past_cadence(e: &Env) {
     e.ledger().with_mut(|l| l.timestamp += 20 * 60 * 60 + 1);
 }
@@ -879,7 +890,7 @@ fn quorum_of_two_of_three_accepts_two_signers() {
         Address::generate(&e),
         Address::generate(&e),
     );
-    vc.set_attestors(&signers(&e, &[&a1, &a2, &a3]), &2);
+    install_attestors(&e, &vc, &signers(&e, &[&a1, &a2, &a3]), 2);
     assert_eq!(vc.get_attestation_threshold(), 2);
 
     let user = Address::generate(&e);
@@ -902,7 +913,7 @@ fn quorum_of_two_rejects_a_single_signer() {
         Address::generate(&e),
         Address::generate(&e),
     );
-    vc.set_attestors(&signers(&e, &[&a1, &a2, &a3]), &2);
+    install_attestors(&e, &vc, &signers(&e, &[&a1, &a2, &a3]), 2);
 
     let user = Address::generate(&e);
     fund_usdc(&e, &usdc, &user, 200_000_000);
@@ -920,7 +931,7 @@ fn same_signer_twice_does_not_satisfy_quorum() {
     let (vault, _t, usdc, _a, _g, _seed) = deploy_with_attestor(&e);
     let vc = VaultContractClient::new(&e, &vault);
     let (a1, a2) = (Address::generate(&e), Address::generate(&e));
-    vc.set_attestors(&signers(&e, &[&a1, &a2]), &2);
+    install_attestors(&e, &vc, &signers(&e, &[&a1, &a2]), 2);
 
     let user = Address::generate(&e);
     fund_usdc(&e, &usdc, &user, 200_000_000);
@@ -956,7 +967,7 @@ fn threshold_above_set_size_reverts() {
     let e = Env::default();
     let (vault, _t, _u, _a, _g, _s) = deploy_with_attestor(&e);
     let (a1, a2) = (Address::generate(&e), Address::generate(&e));
-    VaultContractClient::new(&e, &vault).set_attestors(&signers(&e, &[&a1, &a2]), &3);
+    VaultContractClient::new(&e, &vault).propose_attestors(&signers(&e, &[&a1, &a2]), &3);
 }
 
 #[test]
@@ -965,7 +976,7 @@ fn zero_threshold_reverts() {
     let e = Env::default();
     let (vault, _t, _u, _a, _g, _s) = deploy_with_attestor(&e);
     let a1 = Address::generate(&e);
-    VaultContractClient::new(&e, &vault).set_attestors(&signers(&e, &[&a1]), &0);
+    VaultContractClient::new(&e, &vault).propose_attestors(&signers(&e, &[&a1]), &0);
 }
 
 #[test]
@@ -974,12 +985,12 @@ fn duplicate_attestor_in_set_reverts() {
     let e = Env::default();
     let (vault, _t, _u, _a, _g, _s) = deploy_with_attestor(&e);
     let a1 = Address::generate(&e);
-    VaultContractClient::new(&e, &vault).set_attestors(&signers(&e, &[&a1, &a1]), &2);
+    VaultContractClient::new(&e, &vault).propose_attestors(&signers(&e, &[&a1, &a1]), &2);
 }
 
 #[test]
 #[should_panic] // admin auth absent
-fn non_admin_cannot_set_attestors() {
+fn non_admin_cannot_propose_attestors() {
     let e = Env::default();
     let (vault, _t, _u, _a, _g, _s) = deploy_with_attestor(&e);
     let attacker = Address::generate(&e);
@@ -990,12 +1001,90 @@ fn non_admin_cannot_set_attestors() {
         address: &attacker,
         invoke: &MockAuthInvoke {
             contract: &vault,
-            fn_name: "set_attestors",
+            fn_name: "propose_attestors",
             args: (set.clone(), 1u32).into_val(&e),
             sub_invokes: &[],
         },
     }]);
-    VaultContractClient::new(&e, &vault).set_attestors(&set, &1);
+    VaultContractClient::new(&e, &vault).propose_attestors(&set, &1);
+}
+
+/// A proposed quorum has no effect until the timelock has run: the old set still
+/// attests, the new one cannot yet.
+#[test]
+fn proposed_attestors_are_inert_until_executed() {
+    let e = Env::default();
+    let (vault, _t, usdc, _a, _g, seed) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let a1 = Address::generate(&e);
+    vc.propose_attestors(&signers(&e, &[&a1]), &1);
+    assert_eq!(vc.get_attestors(), signers(&e, &[&seed]));
+    assert!(vc.get_pending_attestors().is_some());
+
+    let user = Address::generate(&e);
+    fund_usdc(&e, &usdc, &user, 200_000_000);
+    vc.subscribe(&user, &100_000_000);
+    advance_past_cadence(&e);
+    // the seeded attestor still rules
+    vc.update_nav(&101_000_000, &proof(&e), &signers(&e, &[&seed]));
+    let r = vc.try_update_nav(&102_000_000, &proof(&e), &signers(&e, &[&a1]));
+    assert!(r.is_err());
+}
+
+#[test]
+fn execute_attestors_before_timelock_reverts() {
+    let e = Env::default();
+    let (vault, _t, _u, _a, _g, _s) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    let a1 = Address::generate(&e);
+    vc.propose_attestors(&signers(&e, &[&a1]), &1);
+    e.ledger()
+        .with_mut(|l| l.timestamp += crate::UPGRADE_TIMELOCK_SECS - 1);
+    assert_eq!(
+        vc.try_execute_attestors(),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            Error::TimelockNotElapsed as u32
+        )))
+    );
+    e.ledger().with_mut(|l| l.timestamp += 1);
+    vc.execute_attestors();
+    assert_eq!(vc.get_attestors(), signers(&e, &[&a1]));
+    assert!(vc.get_pending_attestors().is_none());
+}
+
+#[test]
+fn execute_attestors_without_proposal_reverts() {
+    let e = Env::default();
+    let (vault, _t, _u, _a, _g, _s) = deploy_with_attestor(&e);
+    assert_eq!(
+        VaultContractClient::new(&e, &vault).try_execute_attestors(),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            Error::NoPendingAttestors as u32
+        )))
+    );
+}
+
+#[test]
+#[should_panic] // admin auth absent
+fn non_admin_cannot_execute_attestors() {
+    let e = Env::default();
+    let (vault, _t, _u, _a, _g, _s) = deploy_with_attestor(&e);
+    let vc = VaultContractClient::new(&e, &vault);
+    vc.propose_attestors(&signers(&e, &[&Address::generate(&e)]), &1);
+    e.ledger()
+        .with_mut(|l| l.timestamp += crate::UPGRADE_TIMELOCK_SECS);
+    let attacker = Address::generate(&e);
+    e.set_auths(&[]);
+    e.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &vault,
+            fn_name: "execute_attestors",
+            args: ().into_val(&e),
+            sub_invokes: &[],
+        },
+    }]);
+    vc.execute_attestors();
 }
 
 // ---- the extraordinary path (catastrophe writedowns) -------------------------------
@@ -1899,4 +1988,76 @@ fn convert_to_shares_ceil_rejects_negative_input() {
     let e = Env::default();
     let (vault, _t, _u, _a, _g, _o) = deploy_with_attestor(&e);
     VaultContractClient::new(&e, &vault).convert_to_shares_ceil(&-1);
+}
+
+// ---- state archival over a long notice period ---------------------------------------
+
+/// A redemption request may be the last activity the vault sees for its whole notice
+/// period. With the maximum (90-day) notice, everything the claim depends on - the
+/// request, the vault instance, the baUSD token instance, the redeemer's allowlist flag -
+/// must stay live past the moment it becomes claimable.
+#[test]
+fn max_notice_request_keeps_claim_dependencies_live() {
+    let e = Env::default();
+    let notice: u64 = 90 * 24 * 60 * 60;
+    let (vault, token, usdc, _a, _g, _ops) = deploy_with_notice_and_attestor(&e, notice);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    vc.set_allowlist_enabled(&true);
+    vc.set_allowed(&user, &true);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    let shares = vc.subscribe(&user, &100_000_000);
+    vc.request_redemption(&user, &shares);
+
+    let notice_ledgers = (notice / 5) as u32;
+    let instance_ttl = e.deployer().get_contract_instance_ttl(&vault);
+    let token_ttl = e.deployer().get_contract_instance_ttl(&token);
+    let (allow_ttl, request_ttl) = e.as_contract(&vault, || {
+        let p = e.storage().persistent();
+        (
+            p.get_ttl(&crate::DataKey::Allowlist(user.clone())),
+            p.get_ttl(&crate::DataKey::Redemption(user.clone())),
+        )
+    });
+    for ttl in [instance_ttl, token_ttl, allow_ttl, request_ttl] {
+        assert!(ttl > notice_ledgers, "ttl {ttl} <= notice {notice_ledgers}");
+    }
+}
+
+/// The queued remainder of a partial fill is a live request too: it keeps the same
+/// dependencies alive for its own window.
+#[test]
+fn partial_fill_remainder_keeps_claim_dependencies_live() {
+    let e = Env::default();
+    let notice: u64 = 90 * 24 * 60 * 60;
+    let (vault, token, usdc, _a, _g, ops) = deploy_with_notice_and_attestor(&e, notice);
+    let vc = VaultContractClient::new(&e, &vault);
+    let user = Address::generate(&e);
+    vc.set_allowlist_enabled(&true);
+    vc.set_allowed(&user, &true);
+    fund_usdc(&e, &usdc, &user, 100_000_000);
+    let shares = vc.subscribe(&user, &100_000_000);
+    vc.deploy_capital(&60_000_000); // sleeve now covers only 40 of 100
+    let _ = ops;
+    vc.request_redemption(&user, &shares);
+
+    // Let the request age to its claim date, then partially fill.
+    e.ledger().with_mut(|l| {
+        l.timestamp += notice;
+        l.sequence_number += (notice / 5) as u32;
+    });
+    vc.claim_redemption(&user);
+    assert!(vc.get_redemption(&user).is_some());
+
+    let window = (notice / 5) as u32;
+    let instance_ttl = e.deployer().get_contract_instance_ttl(&vault);
+    let token_ttl = e.deployer().get_contract_instance_ttl(&token);
+    let allow_ttl = e.as_contract(&vault, || {
+        e.storage()
+            .persistent()
+            .get_ttl(&crate::DataKey::Allowlist(user.clone()))
+    });
+    for ttl in [instance_ttl, token_ttl, allow_ttl] {
+        assert!(ttl > window, "ttl {ttl} <= window {window}");
+    }
 }
