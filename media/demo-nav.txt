@@ -1,0 +1,71 @@
+
+════════════════════════════════════════════════════════════
+   baUSD  ·  attested NAV, published price, compliance
+════════════════════════════════════════════════════════════
+
+[1/8]  Fresh LP and treasury accounts, funded with test USDC
+   LP account                     GD4WAQ…G3YB
+   treasury account               GAOJVL…WATQ
+   LP USDC                        200.00
+   ↳ set_treasury         https://stellar.expert/explorer/testnet/tx/5e4390abfe4d79717a7abc38c76475487291143e73a013e39b3ae7917c192498
+   ↳ mint                 https://stellar.expert/explorer/testnet/tx/0267680d668f649c626c5dc40a5e65c5235b9dbf86b28fd0215fd5fc87c941d4
+
+[2/8]  Compliance gate ON — an unlisted LP cannot subscribe
+   allowlist enabled              true
+   subscribe by unlisted LP       rejected — contract error #26 (NotAllowed)
+   ↳ set_allowlist_enabled https://stellar.expert/explorer/testnet/tx/878fb7cadd237d9933a076e10485f85b32d1f4cdb560e38b3568eaabb4793939
+
+[3/8]  Compliance authority allowlists the LP, who then subscribes
+   LP allowlisted                 true
+   deposited                      100.00 USDC
+   baUSD minted                   100.00
+   share price                    1.0000000
+   ↳ set_allowed          https://stellar.expert/explorer/testnet/tx/0e23335996287a46ea071f138113205a368a1117e6429cc28ad1cc62b2f0299e
+   ↳ subscribe            https://stellar.expert/explorer/testnet/tx/109845bbf33e12ebfda98710cb703a975cdedc83502e514a19bcf82c77afc1c9
+
+[4/8]  Price published through the SEP-40 feed
+   feed lastprice                 {"price":"10000000","timestamp":1790909832}
+   feed decimals / resolution     7 / 86400s
+   ↳ record               https://stellar.expert/explorer/testnet/tx/ed459228bb6ca173b67f8fa842a22c832f4b0e39b872cf954bd6a0770c98cbbe
+
+[5/8]  Guards refuse a bad attestation before a good one is accepted
+   attestable budget              2.00 USDC  (2% of the attested baseline)
+   move of 6.00 USDC              rejected — contract error #18
+   attestation by a stranger      rejected — contract error #21
+
+[6/8]  A valid attestation from the quorum, and the price republished
+   attested NAV                   101.00 USDC
+   share price                    1.0099999   ← appreciated
+   LP position now worth          101.00 USDC
+   feed lastprice                 {"price":"10099999","timestamp":1790909942}
+   ↳ update_nav           https://stellar.expert/explorer/testnet/tx/b148e3320e2172949fabbb04ba96733e8f18d82fc45aafbf6310e8d9043d0eb4
+   ↳ record               https://stellar.expert/explorer/testnet/tx/b54d8113b55024f9514da9c4eea24fce1885ab4dc91482aa4573483b51ac7e30
+
+[7/8]  Redemption partially fills — the gain is not in the sleeve yet
+   vault sleeve (on-chain USDC)   100.00
+   owed at claim-time NAV         101.00
+   paid now                       100.00   ← limited by the sleeve
+   still queued                   0.99 baUSD
+   ↳ request_redemption   https://stellar.expert/explorer/testnet/tx/399ab017698d62fcdac23f99a1b04aa3738f7d148687192b76a32e29fcad1df2
+   ↳ claim_redemption     https://stellar.expert/explorer/testnet/tx/a6939d4fe4d52fa99bc3a7c26dc52f834ec1477383be5081c7e047b6ebba564e
+
+[8/8]  Treasury returns capital from treaties; the claim completes
+   sleeve refilled to             10.00
+   paid on completion             1.00
+   total returned to LP           101.00   ← more than the 100.00 deposited
+   redemption fully settled       null
+   ↳ mint                 https://stellar.expert/explorer/testnet/tx/33a89afec1642a9f0f33c584ab8836642a5486f9b56479eb844198c2ebd75dc5
+   ↳ fund_sleeve          https://stellar.expert/explorer/testnet/tx/793fd7e627ad6e23e62e51648ffc1f3b460cbe5de4ca04769531cb18134785d1
+   ↳ claim_redemption     https://stellar.expert/explorer/testnet/tx/3c349d140c50d98ddf1f9c71800082183bc85ae312ab11313509f682f4d0d681
+
+Verify on stellar.expert
+   LP account (all its txs)       https://stellar.expert/explorer/testnet/account/GD4WAQBXYM42O2ZIQQ7TVIEFFMPONZG5GGCTNSMIZ6L3G32HOOZPG3YB
+   vault contract                 https://stellar.expert/explorer/testnet/contract/CDVPVQE5VLOKUEPXUAFM7XBH7TMHRAGFVZUW5VED4Y4BBMD2C6JKQBON
+   SEP-40 price feed              https://stellar.expert/explorer/testnet/contract/CCIVZSYHJTGTNZ3Y7Z4LY3325GO2TTIDD2MVR3WN3CGR4ANBT5FWIEJ5
+   baUSD token                    https://stellar.expert/explorer/testnet/contract/CBDZN7LEXWQQM6TKVHIIZOVWWZL5AQSEA3DTCSQ3BZCJOFL4JNLWCCKP
+
+════════════════════════════════════════════════════════════
+   NAV attested on-chain · price published via SEP-40
+   compliance enforced · appreciation paid out
+════════════════════════════════════════════════════════════
+

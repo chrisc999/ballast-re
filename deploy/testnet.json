@@ -8,5 +8,7 @@
   "strategy": "CD4PIJLCSRRR4ZUA2FOBWIXF3FJOGSSQVKL7MDS5IJJFEHQO6CZVW5MF",
   "notice_period": 0,
   "nav_cadence_secs": 60,
-  "price_oracle_configured": false
+  "price_oracle_configured": false,
+  "defindex_factory": "CDSCWE4GLNBYYTES2OCYDFQA2LLY4RBIAX6ZI32VSUXD7GO6HRPO4A32",
+  "defindex_vault": "CAIEVOWJILFG6V4NPAIEZARC6EBLLXIPE4BXVHHP4GNR32DAXMRMNWM2"
 }

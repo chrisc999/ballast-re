@@ -19,7 +19,8 @@ yield. LPs deposit USDC on Stellar and mint baUSD; the share price is
 ![baUSD testnet demo: an LP deposits 50 USDC, mints 50 baUSD, then redeems for 50 USDC](media/demo.gif)
 
 A real, on-chain run against the deployed testnet contracts (reproduce with
-`./scripts/demo_testnet.sh`).
+`./scripts/demo_testnet.sh`). Every transaction in this run, with its stellar.expert
+link: [`media/demo.txt`](media/demo.txt).
 
 ## Demo — attested NAV, published price, compliance
 
@@ -28,7 +29,8 @@ A real, on-chain run against the deployed testnet contracts (reproduce with
 An unlisted LP is refused, gets allowlisted, deposits 100 USDC; the attestor quorum
 moves NAV up 1% (a 6% move and a stranger's signature are both rejected first); the
 price feed republishes; the LP's redemption pays what the sleeve holds and completes
-once the treasury returns capital (`./scripts/demo_nav_testnet.sh`).
+once the treasury returns capital (`./scripts/demo_nav_testnet.sh`). Transaction links:
+[`media/demo-nav.txt`](media/demo-nav.txt).
 
 ## Demo — baUSD as a DeFindex strategy
 
@@ -36,7 +38,8 @@ once the treasury returns capital (`./scripts/demo_nav_testnet.sh`).
 
 A DeFindex vault created from DeFindex's public testnet factory, with baUSD as its
 strategy: deposit, invest, and an atomic withdrawal through request + claim
-(`./scripts/defindex_testnet.sh`).
+(`./scripts/defindex_testnet.sh`). Transaction links:
+[`media/demo-defindex.txt`](media/demo-defindex.txt).
 
 ## Architecture (short version)
 
@@ -179,7 +182,7 @@ Live testnet contract IDs (see [`deploy/testnet.json`](deploy/testnet.json)):
 | baUSD token | `CBDZN7LEXWQQM6TKVHIIZOVWWZL5AQSEA3DTCSQ3BZCJOFL4JNLWCCKP` |
 | SEP-40 price feed | `CCIVZSYHJTGTNZ3Y7Z4LY3325GO2TTIDD2MVR3WN3CGR4ANBT5FWIEJ5` |
 | DeFindex strategy | `CD4PIJLCSRRR4ZUA2FOBWIXF3FJOGSSQVKL7MDS5IJJFEHQO6CZVW5MF` |
-| DeFindex vault (holds the strategy) | created by `scripts/defindex_testnet.sh`; recorded in `deploy/testnet.json` |
+| DeFindex vault (holds the strategy) | `CAIEVOWJILFG6V4NPAIEZARC6EBLLXIPE4BXVHHP4GNR32DAXMRMNWM2` |
 | Mock USDC (SAC) | `CAJBB6LISKXJN5ON2CCFTGPGEUMK7RNH3SGWIXXHD6Z4NFWZTWKINW2U` |
 
 **NAV cadence on testnet** is set to 60s rather than the 20h default, so the

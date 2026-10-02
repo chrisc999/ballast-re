@@ -1,0 +1,46 @@
+
+════════════════════════════════════════════════════════════
+   baUSD  ·  selectable as a DeFindex strategy
+════════════════════════════════════════════════════════════
+
+[1/6]  The adapter is allowlisted at the baUSD vault (subscriber of record)
+   strategy adapter                   CD4PIJ…W5MF
+   allowlisted                        true
+   ↳ set_allowed          https://stellar.expert/explorer/testnet/tx/d048a9b897bd28ed73a54aafbd02586b6c047870d60d5f71b29fc9b5265c8f3a
+
+[2/6]  A DeFindex vault is created from their public testnet factory
+   created                            CAIEVO…NWM2  (recorded in deploy/testnet.json)
+   asset                              test USDC  ·  strategy: baUSD
+   ↳ create_defindex_vault https://stellar.expert/explorer/testnet/tx/bc66641f446fa039f995b5482d68ce7dd6969c50e38eb12420dd2793025c46ba
+
+[3/6]  A depositor is funded with test USDC
+   depositor                          GDVHX3…C5YT
+   USDC balance                       200.00
+   ↳ mint                 https://stellar.expert/explorer/testnet/tx/4b35d4b76fb81942ab14f89187f7ff0c66f4cc0b05cacacb779618844ac48a2b
+
+[4/6]  Deposit into the DeFindex vault, then the manager allocates to baUSD
+   deposited                          100.00 USDC
+   df-shares held                     100.00
+   invested in baUSD strategy         100.00 USDC
+   ↳ deposit              https://stellar.expert/explorer/testnet/tx/e84e5b2a605b66aeb19811a2760454a21cd56d40317eedcd4ca40a321eabdc9e
+   ↳ rebalance            https://stellar.expert/explorer/testnet/tx/c2e192785d1f3f9da13029327cd794fe14b2629a05324b2de41bdcc3d6b2816f
+
+[5/6]  The position is real baUSD at our vault, held by the adapter
+   adapter position (strategy)        100.00 USDC
+   adapter baUSD                      100.00
+   baUSD vault total_assets           100.00
+
+[6/6]  Withdrawal settles atomically through request + claim
+   withdrawn                          40.00 df-shares
+   depositor USDC                     140.00
+   adapter position (strategy)        60.00 USDC
+   ↳ withdraw             https://stellar.expert/explorer/testnet/tx/16d7fe5282786b34d9b09f020c55445858fee9b3e417013bef4ba38b61c21969
+
+Verify on stellar.expert
+   depositor account (all its txs)    https://stellar.expert/explorer/testnet/account/GDVHX3BABRMJ4PF5CK6EPHLG7OCHMRLQDPQRA6ZHZ37TLSX37XIFC5YT
+   DeFindex vault                     https://stellar.expert/explorer/testnet/contract/CAIEVOWJILFG6V4NPAIEZARC6EBLLXIPE4BXVHHP4GNR32DAXMRMNWM2
+   baUSD strategy adapter             https://stellar.expert/explorer/testnet/contract/CD4PIJLCSRRR4ZUA2FOBWIXF3FJOGSSQVKL7MDS5IJJFEHQO6CZVW5MF
+   baUSD vault                        https://stellar.expert/explorer/testnet/contract/CDVPVQE5VLOKUEPXUAFM7XBH7TMHRAGFVZUW5VED4Y4BBMD2C6JKQBON
+
+baUSD is live as a DeFindex strategy on testnet: CAIEVOWJILFG6V4NPAIEZARC6EBLLXIPE4BXVHHP4GNR32DAXMRMNWM2
+

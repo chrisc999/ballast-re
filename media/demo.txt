@@ -1,0 +1,43 @@
+
+════════════════════════════════════════════════════════════
+   baUSD  ·  deposit → mint → redeem  ·  Stellar testnet
+════════════════════════════════════════════════════════════
+   Vault                      CDVPVQ…QBON
+   baUSD token                CBDZN7…CCKP
+   USDC (mock)                CAJBB6…NW2U
+
+[1/5]  New LP account, funded on testnet
+   LP account                 GAEI3X…7LA4
+
+[2/5]  LP receives 100.00 USDC (mock issuer; real USDC on mainnet)
+   LP USDC                    100.00
+   ↳ mint                 https://stellar.expert/explorer/testnet/tx/3e8dbf5481a14297ff97dc02a195696d4cd4cb7cbcb9be609fb9162dc3e31413
+
+[3/5]  LP subscribes 50.00 USDC  →  vault mints baUSD
+   baUSD minted               50.00
+   LP baUSD balance           50.00
+   LP USDC balance            50.00
+   vault NAV (assets)         50.00
+   vault shares               50.00
+   share price                1.0000
+   ↳ subscribe            https://stellar.expert/explorer/testnet/tx/5613fe2270df2887f4074cd46aebd533574f2d066fe2d0f689b9b803de5f1df5
+
+[4/5]  LP requests redemption of 50.00 baUSD (escrowed in vault)
+   LP baUSD balance           0.00
+   ↳ request_redemption   https://stellar.expert/explorer/testnet/tx/307919df378017035f019406a79d518c0c2e357fca53882ed3967ccbaf8bd206
+
+[5/5]  LP claims  →  baUSD burned, USDC returned (no notice period)
+   LP baUSD balance           0.00
+   LP USDC balance            100.00
+   baUSD total supply         0.00
+   ↳ claim_redemption     https://stellar.expert/explorer/testnet/tx/f9eb9be77e33324263229546f22591564b1e8dd6dffce8dc7e07d4682d9af3c2
+
+Verify on stellar.expert
+   LP account (all its txs)   https://stellar.expert/explorer/testnet/account/GAEI3XBJP5PVTHCKN3FX4SM2BCQPUFOC55WIXZAT5OHKFGEVNTIL7LA4
+   vault contract             https://stellar.expert/explorer/testnet/contract/CDVPVQE5VLOKUEPXUAFM7XBH7TMHRAGFVZUW5VED4Y4BBMD2C6JKQBON
+   baUSD token                https://stellar.expert/explorer/testnet/contract/CBDZN7LEXWQQM6TKVHIIZOVWWZL5AQSEA3DTCSQ3BZCJOFL4JNLWCCKP
+
+════════════════════════════════════════════════════════════
+   ✅  Full cycle complete on Stellar testnet
+════════════════════════════════════════════════════════════
+
