@@ -1,0 +1,48 @@
+# Keeps the testnet vault's NAV fresh so the public deployment stays usable.
+#
+# The vault refuses new deposits once its attested NAV is older than 48h. On testnet
+# there is no off-chain attestation pipeline running, so this job re-attests the
+# CURRENT NAV every 12h (a zero move: share price and balances are unchanged, only the
+# attestation timestamp advances) and republishes the price to the SEP-40 feed.
+#
+# Signs with the testnet deployer key (secret TESTNET_DEPLOYER_SECRET), which is also
+# the testnet attestor. Testnet only; mainnet attestations come from the attestor quorum.
+name: Testnet NAV refresh
+
+on:
+  schedule:
+    - cron: "17 */12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    env:
+      STELLAR_NETWORK: testnet
+      STELLAR_ACCOUNT: ${{ secrets.TESTNET_DEPLOYER_SECRET }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install stellar-cli (prebuilt)
+        run: |
+          curl -sSL -o stellar-cli.tgz https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli-27.1.0-x86_64-unknown-linux-gnu.tar.gz
+          echo "9915fe63753d7154c26bb9e6410cf1d1ff9727a9b378e663c2790ab7a266af94  stellar-cli.tgz" | sha256sum -c -
+          tar xzf stellar-cli.tgz
+          sudo install -m 755 stellar /usr/local/bin/stellar
+
+      - name: Re-attest the current NAV and republish the price
+        run: |
+          field() { jq -r ".$1" deploy/testnet.json; }
+          VAULT="$(field vault)"; ORACLE="$(field oracle)"; ATTESTOR="$(field deployer)"
+          inv() { stellar contract invoke --id "$1" -- "${@:2}"; }
+
+          NAV="$(inv "$VAULT" total_assets | tr -d '"')"
+          # 32-byte attestation reference: hash of what is being attested and when.
+          PROOF="$(printf 'testnet-nav-refresh:%s:%s' "$NAV" "$(date -u +%FT%TZ)" | sha256sum | cut -c1-64)"
+          inv "$VAULT" update_nav --new_total_assets "$NAV" --proof_ref "$PROOF" --signers "[\"$ATTESTOR\"]"
+          inv "$ORACLE" record
+
+          echo "NAV re-attested at $NAV; stale: $(inv "$VAULT" is_nav_stale)"
