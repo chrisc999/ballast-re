@@ -39,12 +39,15 @@ type WalletState = {
 };
 
 // On-chain amounts carry 7 decimals; rounding dust makes the last few digits noise.
-// Display rounds DOWN (never shows more than is there) to `dp` places.
+// Display rounds to the nearest `dp` places (60.9999998 reads as 61.00). Inputs use
+// fmtExact, so nothing typed or redeemed depends on this rounding.
 const fmt = (v: bigint, dp = 2) => {
   const neg = v < 0n;
-  const a = neg ? -v : v;
-  const whole = a / SCALE;
-  const frac = (a % SCALE).toString().padStart(DECIMALS, "0").slice(0, dp);
+  const unit = 10n ** BigInt(DECIMALS - dp);
+  const a = ((neg ? -v : v) + unit / 2n) / unit; // integer count of 10^-dp units
+  const step = 10n ** BigInt(dp);
+  const whole = a / step;
+  const frac = (a % step).toString().padStart(dp, "0");
   return `${neg ? "-" : ""}${whole.toLocaleString("en-US")}${dp ? "." + frac : ""}`;
 };
 
