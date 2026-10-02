@@ -13,8 +13,8 @@ export const USDC_ID = deployment.usdc_sac;
 export const STRATEGY_ID = deployment.strategy;
 /** The DeFindex vault (created from DeFindex's public factory) that allocates to baUSD. */
 export const DEFINDEX_VAULT_ID = deployment.defindex_vault;
-/** Reflector's public testnet feed; the vault reads its USDC/USD price as a depeg guard. */
-export const REFLECTOR_ID = deployment.reflector_oracle;
+/** baUSD's SEP-40 price feed: publishes the vault's attested share price. */
+export const PRICE_FEED_ID = deployment.oracle;
 export const EXPLORER = "https://stellar.expert/explorer/testnet";
 /** Issuer of the mock USDC classic asset; accounts hold it via a trustline,
  *  exactly as they would real USDC. */

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { xdr } from "@stellar/stellar-sdk";
 import { getNetwork, isConnected, requestAccess } from "@stellar/freighter-api";
 import {
   DECIMALS,
@@ -10,7 +11,7 @@ import {
   VAULT_ID,
   STRATEGY_ID,
   DEFINDEX_VAULT_ID,
-  REFLECTOR_ID,
+  PRICE_FEED_ID,
   EXPLORER,
 } from "./config";
 import {
@@ -37,13 +38,11 @@ type VaultState = {
 
 type PriceData = { price: bigint; timestamp: bigint };
 
-/** What the page shows about the two external integrations: Reflector (the USDC
- *  price the vault checks on every deposit) and DeFindex (a DeFindex vault using
- *  baUSD as its strategy). Loaded separately so a hiccup there never blanks the
- *  vault card. */
+/** What the page shows about the two integrations: baUSD's published price feed
+ *  (SEP-40, Reflector's interface) and DeFindex (a DeFindex vault using baUSD as
+ *  its strategy). Loaded separately so a hiccup there never blanks the vault card. */
 type Integrations = {
-  usdcPrice: PriceData | null;
-  reflectorDecimals: number;
+  feedPrice: PriceData | null;
   defindexName: string;
   strategyName: string;
   strategyActive: boolean;
@@ -140,17 +139,16 @@ export default function App() {
 
       try {
         type DfAsset = { strategies: { address: string; name: string; paused: boolean }[] };
-        const [usdcPrice, reflectorDecimals, defindexName, assets, invested] = await Promise.all([
-          v<PriceData | null>(VAULT_ID, "settlement_asset_price"),
-          v<number>(REFLECTOR_ID, "decimals"),
+        const bausAsset = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Stellar"), scAddress(TOKEN_ID)]);
+        const [feedPrice, defindexName, assets, invested] = await Promise.all([
+          v<PriceData | null>(PRICE_FEED_ID, "lastprice", [bausAsset]),
           v<string>(DEFINDEX_VAULT_ID, "name"),
           v<DfAsset[]>(DEFINDEX_VAULT_ID, "get_assets"),
           v<bigint>(STRATEGY_ID, "balance", [scAddress(DEFINDEX_VAULT_ID)]),
         ]);
         const strat = assets[0]?.strategies.find((x) => x.address === STRATEGY_ID);
         setIntegrations({
-          usdcPrice,
-          reflectorDecimals,
+          feedPrice,
           defindexName: defindexName.replace(/^DeFindex-Vault-/, ""),
           strategyName: strat?.name ?? "—",
           strategyActive: !!strat && !strat.paused,
@@ -315,28 +313,24 @@ export default function App() {
 
       <section className="grid">
         <div className="card">
-          <h2>USDC price · Reflector</h2>
-          <p className="hint">Every deposit checks Reflector's live USDC/USD price and is refused if USDC is more than 2% off $1 or the price is over an hour old.</p>
+          <h2>baUSD price feed</h2>
+          <p className="hint">baUSD's attested NAV price, published on-chain through a SEP-40 feed (Reflector's interface), so any Stellar protocol can read it.</p>
           <dl>
             <div>
-              <dt>USDC / USD</dt>
-              <dd className="mono big">
-                {integrations?.usdcPrice
-                  ? (Number(integrations.usdcPrice.price) / 10 ** integrations.reflectorDecimals).toFixed(4)
-                  : "—"}
-              </dd>
+              <dt>baUSD / USDC</dt>
+              <dd className="mono big">{integrations?.feedPrice ? fmtPrice(integrations.feedPrice.price) : "—"}</dd>
             </div>
             <div>
-              <dt>Updated</dt>
+              <dt>NAV attested</dt>
               <dd className="mono">
-                {integrations?.usdcPrice
-                  ? new Date(Number(integrations.usdcPrice.timestamp) * 1000).toLocaleTimeString()
+                {integrations?.feedPrice
+                  ? new Date(Number(integrations.feedPrice.timestamp) * 1000).toLocaleString()
                   : "—"}
               </dd>
             </div>
           </dl>
-          <a href={`${EXPLORER}/contract/${REFLECTOR_ID}`} target="_blank" rel="noreferrer">
-            Reflector feed on stellar.expert
+          <a href={`${EXPLORER}/contract/${PRICE_FEED_ID}`} target="_blank" rel="noreferrer">
+            Price feed on stellar.expert
           </a>
         </div>
 
