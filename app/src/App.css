@@ -116,4 +116,5 @@ button:disabled { opacity: 0.55; cursor: default; }
 .note.run { color: var(--muted); background: var(--surface-2); }
 
 footer { display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); font-size: 0.8rem; border-top: 1px solid var(--line); padding-top: 14px; }
-footer a { color: var(--accent-ink); }
+footer a, .card a { color: var(--accent-ink); }
+.card a { font-size: 0.85rem; align-self: flex-start; }
