@@ -38,17 +38,22 @@ type WalletState = {
   redemption: Redemption;
 };
 
-const fmt = (v: bigint) => {
+// On-chain amounts carry 7 decimals; rounding dust makes the last few digits noise.
+// Display rounds DOWN (never shows more than is there) to `dp` places.
+const fmt = (v: bigint, dp = 2) => {
   const neg = v < 0n;
   const a = neg ? -v : v;
   const whole = a / SCALE;
-  const frac = (a % SCALE).toString().padStart(DECIMALS, "0").replace(/0+$/, "");
-  return `${neg ? "-" : ""}${whole.toLocaleString("en-US")}${frac ? "." + frac : ""}`;
+  const frac = (a % SCALE).toString().padStart(DECIMALS, "0").slice(0, dp);
+  return `${neg ? "-" : ""}${whole.toLocaleString("en-US")}${dp ? "." + frac : ""}`;
 };
 
-// Share price keeps all 7 decimals so small NAV moves are visible (1.0099999, not 1.01).
-const fmtPrice = (v: bigint) =>
+// Exact 7-decimal form, for filling inputs.
+const fmtExact = (v: bigint) =>
   `${(v / SCALE).toString()}.${(v % SCALE).toString().padStart(DECIMALS, "0")}`;
+
+// Share price at 4 decimals: a 1% NAV move reads as 1.0100.
+const fmtPrice = (v: bigint) => fmt(v, 4);
 
 const parseAmount = (s: string): bigint | null => {
   const m = s.trim().match(/^(\d+)(?:\.(\d{1,7}))?$/);
@@ -271,7 +276,7 @@ export default function App() {
             <div className="row">
               <input
                 inputMode="decimal"
-                placeholder="0.0000000"
+                placeholder="0.00"
                 value={depositIn}
                 onChange={(e) => setDepositIn(e.target.value)}
                 aria-label="USDC amount to deposit"
@@ -301,11 +306,17 @@ export default function App() {
                 <div className="row">
                   <input
                     inputMode="decimal"
-                    placeholder="0.0000000"
+                    placeholder="0.00"
                     value={redeemIn}
                     onChange={(e) => setRedeemIn(e.target.value)}
                     aria-label="baUSD amount to redeem"
                   />
+                  <button
+                    onClick={() => wallet && setRedeemIn(fmtExact(wallet.baus))}
+                    disabled={!!busy || !wallet || wallet.baus === 0n}
+                  >
+                    Max
+                  </button>
                   <button className="primary" onClick={requestRedeem} disabled={!!busy}>
                     Request redemption
                   </button>
