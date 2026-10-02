@@ -189,11 +189,8 @@ Live testnet contract IDs (see [`deploy/testnet.json`](deploy/testnet.json)):
 attestation flow is demonstrable immediately after deploy. Mainnet governance sets this to
 the real attestation cadence.
 
-**The depeg guard reads Reflector on testnet.** Every deposit checks Reflector's public
-testnet USDC/USD feed (`CCYOZJCOPG34LLQQ7N24YXBM7LL62R7ONMZ3G6WZAAYPB5OYKOMJRN63`, asset
-`Other("USDC")`) and is refused if USDC is more than 2% off $1 or the price is over an hour
-old. The mock USDC below has no feed of its own, so the real USDC price stands in for it; on
-mainnet the same check covers the USDC the vault actually settles in.
+**The depeg guard is unconfigured on testnet** — the mock USDC below is ours and no public
+oracle carries it. On mainnet, `set_price_oracle` points it at a real SEP-40 feed.
 
 **USDC on testnet:** we deploy our own mock USDC as a classic asset wrapped in a Stellar
 Asset Contract (issuer = deployer), so accounts establish a trustline exactly as they would
